@@ -12,6 +12,9 @@ members = [
     "wxviol",
     "forker",
     "leaker",
+    "delegator",
+    "redelegator",
+    "worker",
 ]
 
 [profile.release]

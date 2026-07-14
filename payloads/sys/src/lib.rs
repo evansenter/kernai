@@ -39,6 +39,8 @@ pub const CAP_SPAWN: usize = 1 << 2;
 
 // Spawnable image selectors (stable ABI; kernel maps these to images).
 pub const SPAWNABLE_CHILD: usize = 0;
+pub const SPAWNABLE_REDELEGATOR: usize = 1;
+pub const SPAWNABLE_WORKER: usize = 2;
 
 pub fn syscall(nr: usize, a0: usize, a1: usize, a2: usize) -> isize {
     let ret: isize;

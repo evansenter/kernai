@@ -17,6 +17,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "delegator"
+version = "0.1.0"
+dependencies = [
+ "sys",
+]
+
+[[package]]
 name = "forker"
 version = "0.1.0"
 dependencies = [
@@ -45,6 +52,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "redelegator"
+version = "0.1.0"
+dependencies = [
+ "sys",
+]
+
+[[package]]
 name = "runaway"
 version = "0.1.0"
 dependencies = [
@@ -64,6 +78,13 @@ version = "0.1.0"
 
 [[package]]
 name = "wild"
+version = "0.1.0"
+dependencies = [
+ "sys",
+]
+
+[[package]]
+name = "worker"
 version = "0.1.0"
 dependencies = [
  "sys",

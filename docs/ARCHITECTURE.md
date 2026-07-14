@@ -1,4 +1,4 @@
-# Architecture (current: M9)
+# Architecture (current: M10)
 
 One page, always accurate. Principles P1–P12 are defined in
 `RFC-001-agent-native-kernel.md`. Beginner-level narrative: `WALKTHROUGH.md`.
@@ -80,7 +80,12 @@ next. Queue drains → `suite_done` → `idle`.
   pages are mapped R|X (never W). A payload cannot address another's frames
   (no PTE) or the kernel's.
 - **Attenuation (P10)**: `granted = requested & parent_caps & image_ceiling`,
-  so a delegation chain can only shrink. Enforced in `payload::on_spawn`.
+  so a delegation chain can only shrink — proven over a two-hop chain where
+  every hop greedily requests all caps (M10: `delegator{write,spawn,yield} →
+  redelegator{write,spawn} → worker{write}`). Enforced in `payload::on_spawn`;
+  `enqueue` re-clamps to the ceiling as defense in depth. `spawn` is
+  payload-only and `CAP_SPAWN`-gated — the control plane is not a capability
+  source.
 - **The serial layer stays dumb**: length-prefix + magic, single-byte commands.
 
 ## Attachment points for later principles
@@ -123,6 +128,7 @@ next. Queue drains → `suite_done` → `idle`.
   unframed → the host noise channel) instead of the rich frame — the A/B
   substrate for E1. Scope: M9 twins the diagnostic path; a fully classic event
   stream is M12 eval machinery.
-- **P10/P3 (M10/M11, next)**: harden the delegation/attenuation lattice against
-  an adversarial spawn chain and the MCP surface (M10); then event coalescing +
-  token-budgeted observability (`?budget=Ntok`, P3) and an autonomy dial (M11).
+- **P3 (M11, next)**: event coalescing + severity filtering + token-budgeted
+  observability (`?budget=Ntok` returns a digest, not the firehose), and an
+  autonomy dial. Then M12 wires the M9 two-surface toggle into the E1–E8 eval
+  suite (seeded-bug stimulus set, surface A/B).

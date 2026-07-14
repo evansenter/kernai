@@ -5,8 +5,8 @@ beyond this repo (we dogfood E3 on ourselves).
 
 ## Current state (2026-07-14, session 2)
 
-**M0–M9 complete and green.** `make test` from a fresh clone runs thirteen
-checks in ~8 seconds (fmt + clippy + build + unsafe budget first):
+**M0–M10 complete and green.** `make test` from a fresh clone runs fourteen
+checks in ~9 seconds (fmt + clippy + build + unsafe budget first):
 
 1. `m0` — framing round-trips over a real pipe (loopback stub)
 2. `m1` — boot to hello frame over the SBI console (RFC acceptance 1)
@@ -37,8 +37,12 @@ checks in ~8 seconds (fmt + clippy + build + unsafe budget first):
     causal parent (the `payload_start` it descends from, threaded through the
     lifecycle events); the same fault on the classic surface (toggled via the
     `set_surface` tool) renders as one printf `[FAULT] …` console line
-12. `determinism` — two input-free boots byte-identical (P9 / E6 seed)
-13. `demo` — the narrated `make demo` (now 11 acts, incl. MCP + two-surface)
+12. `m10` — multi-hop delegation attenuation (P10): a two-hop chain
+    (`delegator{write,spawn,yield} → redelegator{write,spawn} → worker{write}`)
+    where every hop greedily requests all caps still shrinks monotonically;
+    `granted ⊆ parent` at each hop, never re-widening
+13. `determinism` — two input-free boots byte-identical (P9 / E6 seed)
+14. `demo` — the narrated `make demo` (now 11 acts, incl. MCP + two-surface)
 
 CI (`.github/workflows/ci.yml`) runs the same gate + `ci/unsafe_budget.sh`
 on every push. **Unsafe budget: 55/200 lines in 4/4 hal files** — the file
@@ -70,12 +74,12 @@ the local working tree is not durable.
 
 ## What the operator can do
 
-Single command bytes: `r` ring · `x` crash · `p`/`m`/`i`/`f` the M3–M6 suites.
-Or drive it structured: a `0xAA`-led length-prefixed frame carrying JSON-RPC
-(MCP) — `initialize`, `tools/list`, `tools/call {run_suite|crash|ring_read|
-set_surface}`, `resources/list`, `resources/read {trap_ring|processes|spec|
-surface}`. See `harness/mcp.py` for the client and `runner.py::m8`/`m9` for full
-sessions.
+Single command bytes: `r` ring · `x` crash · `p`/`m`/`i`/`f`/`d` the
+M3–M6/M10 suites. Or drive it structured: a `0xAA`-led length-prefixed frame
+carrying JSON-RPC (MCP) — `initialize`, `tools/list`, `tools/call {run_suite|
+crash|ring_read|set_surface}`, `resources/list`, `resources/read {trap_ring|
+processes|spec|surface}`. `run_suite` takes `{suite: p|m|i|f|d}`. See
+`harness/mcp.py` for the client and `runner.py::m8`/`m9`/`m10` for full sessions.
 
 ## Known-broken / caveats
 
@@ -96,32 +100,31 @@ sessions.
 
 ## Exact next step
 
-**M10: delegation/attenuation hardening (P10).** Per the RFC ladder. The
-attenuation lattice (`granted = requested & parent_caps & image_ceiling`) is
-enforced in `payload::on_spawn`, and the M4 audit already covered the direct
-spawn path. M10 pushes on it adversarially:
+**M11: autonomy dial + P3 token-budgeted event budgets.** Per the RFC ladder.
+P3: "operator attention is the scarce resource" — events are coalesced,
+severity-filtered, and budgeted, because the operator's attention is metered in
+tokens, not interrupts. M11:
 
-1. Deeper chains: today `spawner → child` is one level. Add a fixture that
-   spawns a grandchild (a child that itself spawns), and assert caps can only
-   ever shrink along the whole chain — never re-widen at any hop.
-2. The MCP surface as an attenuation vector: can a control-plane caller grant
-   caps a payload couldn't grant itself? (Today `spawn` is payload-only; if M10
-   adds a `spawn` *tool*, it must respect the same lattice, and probably a
-   control-plane ceiling.) Decide and log whether the operator is “root” or is
-   itself capability-bounded.
-3. Adversarial audit (this is a security milestone — follow the M4/M5/M8
-   pattern): a fixture battery that tries to widen caps via spawn ordering,
-   integer tricks on the caps bitmask, reused/forged pids, and the snapshot/
-   fork path (does a forked continuation inherit exactly the parent’s CapSet,
-   no more?). 
-4. Acceptance: an `m10` check proving a multi-hop delegation chain monotonically
-   attenuates and every widening attempt is refused. Add to `make test`.
+1. Severity on events: tag each event kind with a severity (e.g. tick=trace,
+   payload_start=info, syscall_denied=warn, fault=error). Additive field, keep
+   existing consumers working.
+2. A budgeted observability resource: `resources/read` (or a tool) that takes a
+   token/'item' budget and returns a *coalesced digest* — the last-K by
+   severity, counts of what was elided — rather than the firehose. The trap
+   ring and process table are the obvious first digestible resources; coalesce
+   repeated ticks into a count. Think `?budget=N`.
+3. Autonomy dial: a control-plane setting (like `set_surface`) that selects how
+   much the kernel acts on its own vs. surfaces a decision — e.g. auto-reap vs.
+   hold a faulted payload for operator inspection, or auto-fork vs. ask. Start
+   with one concrete knob and its event.
+4. Acceptance: an `m11` check that a budgeted read returns a bounded digest
+   (fewer items than the full stream) while preserving the high-severity events,
+   and that the autonomy dial changes an observable behavior. Add to `make test`.
 
-Then M11 (autonomy dial + P3 token-budgeted event summaries — `?budget=Ntok`
-returns a coalesced digest, not the firehose) and M12 (the E1–E8 eval suite:
-wire the M9 two-surface toggle into an actual A/B harness with a seeded-bug
-stimulus set, plus E2/E3/E5). After the ladder, expand per the RFC's spirit —
-the eval suite as a public benchmark, the MCP surface published as the spec.
+Then M12: the E1–E8 eval suite — wire the M9 two-surface toggle into an actual
+A/B harness over a seeded-bug stimulus set (E1), plus E2/E3/E5. After the
+ladder, expand per the RFC's spirit — the eval suite as a public benchmark, the
+MCP surface published as the spec (v0.1).
 
 Then M10 (delegation/attenuation hardening — an adversarial pass on the P10
 lattice and the MCP surface), M11 (autonomy dial + P3 event budgets:

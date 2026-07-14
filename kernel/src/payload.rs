@@ -95,6 +95,9 @@ static WILD: &[u8] = include_bytes!(env!("PAYLOAD_WILD"));
 static WXVIOL: &[u8] = include_bytes!(env!("PAYLOAD_WXVIOL"));
 static FORKER: &[u8] = include_bytes!(env!("PAYLOAD_FORKER"));
 static LEAKER: &[u8] = include_bytes!(env!("PAYLOAD_LEAKER"));
+static DELEGATOR: &[u8] = include_bytes!(env!("PAYLOAD_DELEGATOR"));
+static REDELEGATOR: &[u8] = include_bytes!(env!("PAYLOAD_REDELEGATOR"));
+static WORKER: &[u8] = include_bytes!(env!("PAYLOAD_WORKER"));
 
 static IMAGES: &[Image] = &[
     Image {
@@ -166,6 +169,27 @@ static IMAGES: &[Image] = &[
         caps: CAP_WRITE,
         deadline: 0,
     },
+    // M10 delegation chain. Ceilings shrink down the chain so that even a
+    // greedy "request everything" at each hop can only attenuate:
+    //   delegator {write,spawn,yield} → redelegator {write,spawn} → worker {write}
+    Image {
+        name: "delegator",
+        elf: DELEGATOR,
+        caps: CAP_WRITE | CAP_SPAWN | CAP_YIELD,
+        deadline: 0,
+    },
+    Image {
+        name: "redelegator",
+        elf: REDELEGATOR,
+        caps: CAP_WRITE | CAP_SPAWN,
+        deadline: 0,
+    },
+    Image {
+        name: "worker",
+        elf: WORKER,
+        caps: CAP_WRITE,
+        deadline: 0,
+    },
 ];
 
 const IMG_HELLO: usize = 0;
@@ -178,12 +202,17 @@ const IMG_WILD: usize = 6;
 const IMG_WXVIOL: usize = 7;
 const IMG_FORKER: usize = 8;
 const IMG_LEAKER: usize = 9;
+const IMG_DELEGATOR: usize = 10;
+const IMG_REDELEGATOR: usize = 11;
+const IMG_WORKER: usize = 12;
 
 /// Map a payload-supplied spawn selector (stable ABI, see payloads/sys) to an
 /// image index. Only images a payload is allowed to spawn appear here.
 fn spawnable_image(selector: usize) -> Option<usize> {
     match selector {
-        0 => Some(IMG_CHILD), // sys::SPAWNABLE_CHILD
+        0 => Some(IMG_CHILD),       // sys::SPAWNABLE_CHILD
+        1 => Some(IMG_REDELEGATOR), // sys::SPAWNABLE_REDELEGATOR
+        2 => Some(IMG_WORKER),      // sys::SPAWNABLE_WORKER
         _ => None,
     }
 }
@@ -348,6 +377,17 @@ pub fn seed_suite_m6() {
     clear_table();
     enqueue(IMG_FORKER, IMAGES[IMG_FORKER].caps, NO_PID);
     AUTO_FORK.store(2, RE); // two what-if continuations
+}
+
+/// M10 suite (operator-triggered by 'd'): a two-hop delegation chain (P10). The
+/// delegator holds {write,spawn,yield} and spawns a redelegator requesting ALL
+/// caps; the grant attenuates to {write,spawn} (the redelegator ceiling). The
+/// redelegator, again requesting ALL caps, spawns a worker granted only
+/// {write}. Capabilities monotonically shrink down the chain — a greedy request
+/// at any hop cannot re-widen it.
+pub fn seed_suite_m10() {
+    clear_table();
+    enqueue(IMG_DELEGATOR, IMAGES[IMG_DELEGATOR].caps, NO_PID);
 }
 
 fn enqueue(image: usize, caps: u32, parent: usize) -> Option<usize> {

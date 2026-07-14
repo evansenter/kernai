@@ -10,8 +10,19 @@ fn main() {
 
     let payload_dir = format!("{dir}/../payloads/target/riscv64gc-unknown-none-elf/release");
     for name in [
-        "hello", "crasher", "muzzled", "spawner", "child", "runaway", "wild", "wxviol", "forker",
+        "hello",
+        "crasher",
+        "muzzled",
+        "spawner",
+        "child",
+        "runaway",
+        "wild",
+        "wxviol",
+        "forker",
         "leaker",
+        "delegator",
+        "redelegator",
+        "worker",
     ] {
         let path = format!("{payload_dir}/{name}");
         if !Path::new(&path).exists() {

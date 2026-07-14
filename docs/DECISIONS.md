@@ -451,3 +451,19 @@ RFC's `surface-classic`) is E-suite machinery deferred to M12, where the A/B is
 run end-to-end. Chosen over a cargo feature (two builds) because a runtime
 toggle keeps `make test` single-binary and lets one recorded session compare
 both surfaces.
+
+**2026-07-14 · M10 · Multi-hop delegation attenuation proven with a greedy chain; the control plane is not a capability source.**
+M4 proved single-hop attenuation (`spawner → child`). M10 adds a two-hop chain
+(`delegator {write,spawn,yield} → redelegator {write,spawn} → worker {write}`)
+where every hop *requests all capabilities* (`sys::spawn(sel, !0)`), and shows
+the grant still shrinks monotonically at each hop: `granted = requested &
+parent_caps & image_ceiling ⊆ parent_caps`, always. Defense in depth: `enqueue`
+also re-clamps `caps & image_ceiling`, so even the seed path can't over-grant.
+Operator model decision: `spawn` stays a payload-only, `CAP_SPAWN`-gated
+syscall; the MCP control plane exposes no `spawn`/`set_caps` tool, so there is
+no path for the operator to mint or widen a capability — the control plane runs
+pre-defined suites, it is not a capability authority. (If a future milestone
+adds a control-plane spawn, it must carry its own ceiling and respect the same
+lattice; logged here so the invariant isn't quietly broken.) Fixtures:
+`delegator`/`redelegator`/`worker`; suite seeded by `seed_suite_m10`, driven by
+the `d` command byte or MCP `run_suite {suite:"d"}`; asserted by `runner.py::m10`.

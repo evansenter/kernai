@@ -653,6 +653,64 @@ def m9_diagnostic_frames_and_classic_twin():
         assert fault3 is not None and "regs" in fault3, "agentic surface did not restore"
 
 
+@milestone("m10")
+def m10_delegation_attenuation():
+    """Multi-hop delegation attenuation (P10). A two-hop chain — delegator
+    {write,yield,spawn} → redelegator {write,spawn} → worker {write} — where
+    every hop *greedily requests all capabilities*, must still shrink
+    monotonically: granted ⊆ parent at each hop, and a greedy request can never
+    re-widen the set. Spawn is a payload-only, capability-gated syscall; the
+    control plane is not a capability source, so there is no operator path to
+    widen a grant either."""
+    from .mcp import Mcp
+    from .qemu import QemuKernel
+
+    def caps(cs):
+        return frozenset(cs)
+
+    with QemuKernel() as q:
+        assert json.loads(q.stream.next_frame(timeout=60))["type"] == "hello"
+        m = Mcp(q)
+        m.result("tools/call", {"name": "run_suite", "arguments": {"suite": "d"}})
+        starts, spawns = {}, []
+        while True:
+            e = json.loads(q.stream.next_frame(timeout=30))
+            if e["type"] == "payload_start":
+                starts[e["name"]] = e
+            elif e["type"] == "payload_spawn":
+                spawns.append(e)
+            elif e["type"] == "suite_done":
+                break
+
+        assert {"delegator", "redelegator", "worker"} <= set(starts), \
+            f"chain did not run to completion: {list(starts)}"
+        deleg = caps(starts["delegator"]["caps"])
+        redel = caps(starts["redelegator"]["caps"])
+        worker = caps(starts["worker"]["caps"])
+
+        # The chain's granted CapSets shrink strictly at each hop.
+        assert deleg == {"write", "yield", "spawn"}, f"delegator caps: {deleg}"
+        assert redel == {"write", "spawn"}, f"redelegator caps: {redel}"
+        assert worker == {"write"}, f"worker caps: {worker}"
+        assert worker < redel < deleg, f"not strictly attenuating: {deleg} {redel} {worker}"
+
+        # Both spawns were greedy (requested more than granted) and attenuated;
+        # granted is always a subset of the spawning parent's own caps.
+        assert len(spawns) == 2, f"expected two spawns, got {len(spawns)}"
+        by_child = {s["child"]: s for s in spawns}
+        s1 = by_child[starts["redelegator"]["pid"]]
+        s2 = by_child[starts["worker"]["pid"]]
+        assert s1["attenuated"] and caps(s1["granted"]) == redel
+        assert caps(s1["granted"]) <= caps(s1["parent_caps"]) == deleg, \
+            f"hop 1 widened: {s1}"
+        assert s2["attenuated"] and caps(s2["granted"]) == worker
+        assert caps(s2["granted"]) <= caps(s2["parent_caps"]) == redel, \
+            f"hop 2 widened: {s2}"
+        # A greedy request was actually made (superset of what was granted).
+        assert caps(s2["granted"]) < caps(s2["requested"]), \
+            f"redelegator's request was not greedy: {s2}"
+
+
 @milestone("determinism")
 def determinism_two_boots():
     """P9 seed (E6): two input-free boots yield byte-identical event streams."""

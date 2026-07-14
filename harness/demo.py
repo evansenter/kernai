@@ -423,9 +423,10 @@ agent ever sees is exactly reproducible.
         show(json.loads(fa))
     say(f"Two fresh boots produced identical streams ({len(a)} frames compared).")
     note("""
-That's M0-M9: a kernel that boots, narrates itself in structured events, runs
+That's M0-M10: a kernel that boots, narrates itself in structured events, runs
 sandboxed user programs in private address spaces (paging + W^X), enforces
-capabilities and delegation, kills runaways on an instruction budget,
+capabilities and multi-hop delegation (grants only ever shrink down a chain),
+kills runaways on an instruction budget,
 checkpoints and forks a running program, replays a recorded session
 byte-for-byte, is driven as a self-describing MCP server, and reports faults as
 rich causal diagnostic frames with a classic printf twin for measuring the

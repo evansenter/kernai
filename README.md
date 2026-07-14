@@ -16,8 +16,10 @@ a bit-identical event stream (M7, E6); an MCP/JSON-RPC control plane inside the
 same frames — tools, resources, a self-describing `spec`, and idempotent
 mutating calls (M8, P4/P5); rich P6 diagnostic frames — full register file plus
 a P12 causal parent — and a runtime-toggled `surface-classic` printf twin for
-the E1 A/B (M9). See `docs/HANDOFF.md` for the exact next step
-(M10: delegation/attenuation hardening).
+the E1 A/B (M9); a multi-hop delegation chain proving capabilities only ever
+attenuate, never re-widen, even under a greedy "request everything" at each hop
+(M10, P10). See `docs/HANDOFF.md` for the exact next step
+(M11: autonomy dial + token-budgeted event summaries).
 
 ## Bootstrap (Ubuntu 24.04 or similar)
 
@@ -46,7 +48,8 @@ make test    # full acceptance suite: framing (M0), boot (M1), traps/timer/fault
              # (M2), U-mode payloads (M3), caps/spawn/deadline (M4), paging/
              # isolation (M5), checkpoint/fork (M6), deterministic replay (M7),
              # MCP control plane (M8), diagnostic frames + classic twin (M9),
-             # input hardening, determinism, demo — plus unsafe budget; CI runs this
+             # delegation attenuation (M10), input hardening, determinism, demo —
+             # plus unsafe budget; CI runs this
 make debug   # boot QEMU halted with a gdb stub on :1234
 make gdb     # attach gdb-multiarch to a running `make debug`
 ```
@@ -54,7 +57,8 @@ make gdb     # attach gdb-multiarch to a running `make debug`
 Once booted (`make run`), the kernel serves single-byte operator commands on
 the serial line: `r` dumps the trap ring, `x` crashes the kernel on purpose,
 `p` runs the M3 payload suite, `m` the M4 sandbox suite, `i` the M5 isolation
-suite, `f` the M6 checkpoint/fork suite. A leading `0xAA` byte instead begins
+suite, `f` the M6 checkpoint/fork suite, `d` the M10 delegation-chain suite. A
+leading `0xAA` byte instead begins
 an MCP/JSON-RPC request frame (M8): the structured control plane those bytes
 are a stand-in for — `initialize`, `tools/list`, `tools/call`,
 `resources/read` (`trap_ring`, `processes`, and the self-describing `spec`).
