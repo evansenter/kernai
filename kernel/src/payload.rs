@@ -299,6 +299,13 @@ pub fn mark_faulted() {
     }
 }
 
+/// Clear the running-payload marker as a payload leaves the CPU. Called from
+/// the trap handler's redirect so the interrupts-enabled scheduler window
+/// never observes a stale CURRENT (which on_tick could misread).
+pub fn leave_current() {
+    CURRENT.store(NO_PID, RE);
+}
+
 /// Called from the timer handler. Returns true if the current payload has
 /// exhausted its instruction-count deadline and must be killed (P1/P2): a
 /// runaway payload becomes a structured event, not a hung machine.
@@ -307,6 +314,12 @@ pub fn on_tick() -> bool {
         Some(p) => p,
         None => return false,
     };
+    // Only a RUNNING payload can be over budget. Guards against a stale
+    // CURRENT (e.g. a tick landing in the scheduler right after a payload
+    // left) causing a spurious kill of an already-terminal slot.
+    if TABLE[pid].state.load(RE) != RUNNING {
+        return false;
+    }
     let deadline = TABLE[pid].deadline.load(RE);
     if deadline == 0 {
         return false;
@@ -357,7 +370,14 @@ pub fn on_spawn(selector: usize, requested_caps: u32) -> isize {
     let granted = requested_caps & parent_caps & IMAGES[image].caps;
     match enqueue(image, granted, parent) {
         Some(child) => {
-            emit_spawn(parent, child, IMAGES[image].name, requested_caps, granted);
+            emit_spawn(
+                parent,
+                child,
+                IMAGES[image].name,
+                parent_caps,
+                requested_caps,
+                granted,
+            );
             child as isize
         }
         None => crate::syscall::EAGAIN,
@@ -478,16 +498,26 @@ fn emit_yield(pid: usize) {
     });
 }
 
-/// The delegation event (P10): both the requested and the granted CapSets so
-/// an operator can see attenuation happen — granted is always a subset.
-fn emit_spawn(parent: usize, child: usize, name: &str, requested: u32, granted: u32) {
+/// The delegation event (P10): the parent's CapSet, the requested set, and the
+/// granted set, so an operator can verify attenuation directly — granted is
+/// always a subset of the parent's caps.
+fn emit_spawn(
+    parent: usize,
+    child: usize,
+    name: &str,
+    parent_caps: u32,
+    requested: u32,
+    granted: u32,
+) {
     hal::without_interrupts(|| {
         let mut f = FrameBuf::new();
         let _ = write!(
             f,
-            r#"{{"id":{},"type":"payload_spawn","parent":{parent},"child":{child},"name":"{name}","requested":"#,
+            r#"{{"id":{},"type":"payload_spawn","parent":{parent},"child":{child},"name":"{name}","parent_caps":"#,
             events::next_id()
         );
+        caps_json(&mut f, parent_caps);
+        let _ = f.write_str(r#","requested":"#);
         caps_json(&mut f, requested);
         let _ = f.write_str(r#","granted":"#);
         caps_json(&mut f, granted);

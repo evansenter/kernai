@@ -5,10 +5,11 @@ the thesis and `CLAUDE.md` for working conventions. New here — or new to
 kernels entirely? Start with `docs/WALKTHROUGH.md`, then run `make demo`.
 
 Current state: **M4** — boot, traps, SBI timer, trap ring, structured fault
-reports (M0–M2); U-mode payloads running to `sys_exit` with isolation
-(M3); a capability-gated syscall surface with spawn attenuation and
-instruction-count deadline kill (M4). See `docs/HANDOFF.md` for the exact
-next step (M5: paging).
+reports (M0–M2); U-mode payloads running to `sys_exit`, privilege- and
+fault-isolated — a payload crash kills only the payload (M3); a
+capability-gated syscall surface with spawn attenuation and instruction-count
+deadline kill (M4). Per-payload *memory* isolation (paging) is the next
+milestone. See `docs/HANDOFF.md` for the exact next step (M5: paging).
 
 ## Bootstrap (Ubuntu 24.04 or similar)
 

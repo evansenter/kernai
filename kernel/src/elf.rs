@@ -34,14 +34,24 @@ impl ElfError {
 
 const PT_LOAD: u32 = 1;
 
+// All offset arithmetic below is checked: the header fields are treated as
+// adversarial (that is the design intent — M9 feeds this loader hostile
+// images), so a malformed image must become a structured Err, never a panic,
+// in every build profile (debug overflow-checks included).
 fn u16_at(b: &[u8], off: usize) -> Option<u16> {
-    Some(u16::from_le_bytes(b.get(off..off + 2)?.try_into().ok()?))
+    Some(u16::from_le_bytes(
+        b.get(off..off.checked_add(2)?)?.try_into().ok()?,
+    ))
 }
 fn u32_at(b: &[u8], off: usize) -> Option<u32> {
-    Some(u32::from_le_bytes(b.get(off..off + 4)?.try_into().ok()?))
+    Some(u32::from_le_bytes(
+        b.get(off..off.checked_add(4)?)?.try_into().ok()?,
+    ))
 }
 fn u64_at(b: &[u8], off: usize) -> Option<u64> {
-    Some(u64::from_le_bytes(b.get(off..off + 8)?.try_into().ok()?))
+    Some(u64::from_le_bytes(
+        b.get(off..off.checked_add(8)?)?.try_into().ok()?,
+    ))
 }
 
 fn arena_offset(vaddr: u64) -> Option<usize> {
@@ -80,8 +90,19 @@ pub fn load(image: &[u8]) -> Result<usize, ElfError> {
         return Err(ElfError::BadProgramHeaders);
     }
 
+    let phoff = usize::try_from(phoff).map_err(|_| ElfError::BadProgramHeaders)?;
+    // The whole program-header table must fit in the image (also bounds every
+    // `ph + delta` field read below, and rejects an overflowing table span).
+    let table_span = phnum
+        .checked_mul(phentsize)
+        .and_then(|s| phoff.checked_add(s))
+        .ok_or(ElfError::BadProgramHeaders)?;
+    if table_span > image.len() {
+        return Err(ElfError::BadProgramHeaders);
+    }
+
     for i in 0..phnum {
-        let ph = usize::try_from(phoff).map_err(|_| ElfError::BadProgramHeaders)? + i * phentsize;
+        let ph = phoff + i * phentsize; // < table_span ≤ image.len(); no overflow
         let p_type = u32_at(image, ph).ok_or(ElfError::BadProgramHeaders)?;
         if p_type != PT_LOAD {
             continue;
@@ -99,15 +120,22 @@ pub fn load(image: &[u8]) -> Result<usize, ElfError> {
         }
 
         let src_start = usize::try_from(p_offset).map_err(|_| ElfError::BadProgramHeaders)?;
+        let src_end = src_start
+            .checked_add(filesz)
+            .ok_or(ElfError::BadProgramHeaders)?;
         let src = image
-            .get(src_start..src_start + filesz)
+            .get(src_start..src_end)
             .ok_or(ElfError::BadProgramHeaders)?;
 
         // Copy file bytes, then zero the tail (.bss lives in memsz > filesz).
+        // arena_write/arena_zero bounds-check dst internally (checked_add).
         if !hal::arena_write(dst_off, src) {
             return Err(ElfError::SegmentOutOfArena);
         }
-        if !hal::arena_zero(dst_off + filesz, memsz - filesz) {
+        let zero_off = dst_off
+            .checked_add(filesz)
+            .ok_or(ElfError::SegmentOutOfArena)?;
+        if !hal::arena_zero(zero_off, memsz - filesz) {
             return Err(ElfError::SegmentOutOfArena);
         }
     }

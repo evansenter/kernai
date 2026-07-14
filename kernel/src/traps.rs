@@ -197,6 +197,9 @@ pub fn handle(frame: &mut TrapFrame) {
 /// a payload hands the CPU back to the kernel without a separate context
 /// switch: the normal trap-restore path does the work.
 fn redirect_to_scheduler(frame: &mut TrapFrame) {
+    // Clear CURRENT now, in trap context (interrupts off), so the scheduler —
+    // which resumes with interrupts on — never runs with a stale CURRENT.
+    crate::payload::leave_current();
     frame.sepc = (crate::payload::scheduler_resume as *const () as usize) as u64;
     frame.sstatus |= SSTATUS_SPP; // return to S-mode
     frame.sstatus |= SSTATUS_SPIE; // interrupts on after sret

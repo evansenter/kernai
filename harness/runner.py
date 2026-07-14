@@ -51,7 +51,11 @@ def _await(q, evt_type, seen, timeout=60):
         remaining = deadline - time.monotonic()
         assert remaining > 0, \
             f"no {evt_type} event within {timeout}s (last events: {seen[-3:]})"
-        evt = q.next_event(remaining)
+        try:
+            evt = q.next_event(remaining)
+        except TimeoutError as e:
+            # A silent guest raises TimeoutError; turn it into a clean failure.
+            raise AssertionError(f"no {evt_type} event within {timeout}s: {e}") from e
         assert evt is not None, f"EOF while waiting for {evt_type}; stderr: {q.stderr_tail()}"
         seen.append(evt)
         if evt["type"] == evt_type:
@@ -187,14 +191,18 @@ def m4_caps_spawn_deadline():
         assert any(x["pid"] == muzzled["pid"] and x["code"] == 7
                    for x in by_type["payload_exit"]), "muzzled did not exit 7"
 
-        # Spawn attenuation: granted ⊆ requested, and specifically yield was
-        # stripped because the parent (spawner) lacks it (P10).
+        # Spawn attenuation (P10): granted ⊆ parent's caps (the lattice never
+        # widens), granted ⊆ requested, and specifically yield was stripped
+        # because the parent (spawner) lacks it.
         spawn = by_type["payload_spawn"][0]
         assert spawn["attenuated"] is True, f"expected attenuation: {spawn}"
-        assert "yield" in spawn["requested"] and "yield" not in spawn["granted"], \
-            f"yield should have been attenuated away: {spawn}"
+        assert set(spawn["granted"]).issubset(set(spawn["parent_caps"])), \
+            f"P10 violated — granted not a subset of parent's caps: {spawn}"
         assert set(spawn["granted"]).issubset(set(spawn["requested"])), \
             f"granted not a subset of requested: {spawn}"
+        assert "yield" in spawn["requested"] and "yield" not in spawn["parent_caps"] \
+            and "yield" not in spawn["granted"], \
+            f"yield should have been attenuated away (parent lacks it): {spawn}"
 
         # The spawned child actually ran, with only the attenuated caps.
         child = next(e for e in by_type["payload_start"] if e["name"] == "child")
@@ -288,8 +296,11 @@ def main(argv):
             return 2
         try:
             check()
-        except AssertionError as e:
-            print(f"[FAIL] {name}: {e}")
+        except (AssertionError, KeyError, StopIteration, IndexError, TimeoutError) as e:
+            # A missing expected event surfaces as KeyError/StopIteration/
+            # IndexError from the lookups; render it as a clean [FAIL], not a
+            # traceback. (It still fails — it never lets a regression pass.)
+            print(f"[FAIL] {name}: {type(e).__name__}: {e}")
             return 1
         print(f"[ OK ] {name}: {check.__doc__.strip().splitlines()[0]}")
     return 0

@@ -200,3 +200,44 @@ resident payload there is nothing to switch to, so it resumes the caller.
 Real rescheduling needs multiple resident payloads (M5). The syscall and its
 cap gate are wired now so the ABI is stable; only the scheduler behaviour
 changes at M5.
+
+**2026-07-14 · M3/M4 · Fixes from the five-reviewer adversarial audit of the U-mode surface.**
+Five parallel reviewers (trap/privilege asm, ELF loader, capability soundness,
+hal unsafe/budget, acceptance rigor) audited the M3/M4 diff. Confirmed
+findings were fixed:
+- *HIGH — sscratch desync in enter_user*: enter_user armed sscratch while in
+  S-mode with interrupts enabled (the scheduler runs with SIE=1). A timer in
+  the window between the sscratch write and the sret was misclassified as
+  from-U; __kernai_trap then reset sscratch to 0, so the payload entered with
+  a desynced sscratch and its NEXT trap would build the kernel trap frame on
+  the payload's own stack — a privilege-boundary break (reviewer reproduced a
+  wedge with a hostile-sp payload). Fixed: enter_user now clears sstatus.SIE
+  (`csrci sstatus, 2`) before arming sscratch; the sret restores SIE from
+  SPIE=1, re-enabling interrupts atomically on entry to U-mode. Window closed.
+- *LOW — trap vector misclassified a U-mode trap with user sp==0 as from-S*
+  because it overloaded sscratch==0 as the from-S sentinel. Fixed: the vector
+  now reconstructs the interrupted sp by testing sstatus.SPP (the definitive
+  trapped-privilege bit), not the sscratch value.
+- *LOW — stale CURRENT window*: after a redirect the scheduler runs with
+  interrupts on while CURRENT still named the departed payload, so a timer's
+  on_tick could spuriously kill an already-terminal slot. Fixed two ways:
+  redirect_to_scheduler clears CURRENT in trap context before the sret, and
+  on_tick ignores any slot not in RUNNING.
+- *LOW — ELF loader overflow*: header-field arithmetic used unchecked +/*, so
+  a crafted image panics under debug overflow-checks (the design intent is
+  that adversarial images become structured events, not panics — M9 feeds
+  this hostile input). Fixed: all offset math is checked; the program-header
+  table is bounds-validated up front.
+- *LOW — doc honesty*: README said M3 payloads run "with isolation" and the
+  walkthrough said "fenced-off" memory. Pre-paging there is no MMU/PMP, so a
+  U-mode payload can address all RAM; isolation today is privilege-level and
+  fault-level, not memory-level (that lands at M5). Both reworded.
+- *LOW — harness failure legibility*: _await now converts a silent-guest
+  TimeoutError to a clean assertion; the runner catches KeyError/
+  StopIteration/IndexError so a missing event reads as [FAIL], not a
+  traceback; the demo M4 loop guards EOF. The payload_spawn event now carries
+  the parent's CapSet and m4 asserts granted ⊆ parent directly (P10), instead
+  of inferring it from the fixtures.
+Reviewers confirmed no capability-widening path, sound arena bounds-checking,
+correct budget accounting (now 59/200, 4/4 files), and zero flakiness
+(m3 15/15, m4 15/15, deterministic deadline kill).

@@ -144,10 +144,14 @@ to call OpenSBI).
 Three things:
 
 - **The kernel loaded an ELF file** (the standard executable format) into a
-  fenced-off region of memory (the "arena", at `0x80400000`), then dropped to
+  dedicated region of memory (the "arena", at `0x80400000`), then dropped to
   user mode to run it. `payload_start` announces this; `caps` is the program's
   **capability set** — the exact list of privileged operations it's allowed
-  to request. This one may `write`, nothing else.
+  to request. This one may `write`, nothing else. (The isolation so far is at
+  the *privilege* level — a payload can't run privileged instructions — and
+  the *fault* level — a crash is contained. True *memory* isolation, where a
+  payload physically cannot read the kernel's memory, needs paging and arrives
+  at M5; today the arena is a convention, not yet a hardware fence.)
 - **Output is tagged `"untrusted": true`.** Bytes coming *from* a workload are
   data, never instructions — the kernel confines them to a JSON string and
   never lets them be read as commands by itself or its operator (principle P7:

@@ -62,15 +62,17 @@ __trap_vector:
     sd   x29, 224(sp)
     sd   x30, 232(sp)
     sd   x31, 240(sp)
-    csrr t1, sscratch           // from U: interrupted user sp; from S: 0
+    csrr t0, sstatus            // classify by the trapped privilege (SPP),
+    sd   t0, 256(sp)            // never by an overloaded sscratch==0 sentinel
+    csrr t2, sepc
+    sd   t2, 248(sp)
+    andi t1, t0, 0x100          // sstatus.SPP (bit 8): 1 = trap from S-mode
     bnez t1, 2f
-    addi t1, sp, 272            // from S: pre-trap kernel sp
-2:  sd   t1, 8(sp)              // x2 slot
-    csrw sscratch, zero         // we are in the kernel now: S-mode convention
-    csrr t0, sepc
-    sd   t0, 248(sp)
-    csrr t0, sstatus
-    sd   t0, 256(sp)
+    csrr t1, sscratch           // from U: interrupted user sp (may legitimately be 0)
+    j    3f
+2:  addi t1, sp, 272            // from S: pre-trap kernel sp
+3:  sd   t1, 8(sp)              // x2 slot (t0/t1/t2 = x5/x7/x6, already saved)
+    csrw sscratch, zero         // in the kernel now: S-mode convention
     mv   a0, sp
     call __kernai_trap
     ld   t0, 248(sp)
@@ -144,16 +146,26 @@ extern "C" fn __kernai_trap(frame: &mut TrapFrame) {
 /// The payload's own `_start` sets its stack; registers are not scrubbed
 /// (no kernel secrets exist yet — revisit with M5 isolation).
 pub fn enter_user(entry: usize) -> ! {
-    csr::write_sscratch(boot::trap_stack_top());
-    // SAFETY: sets sepc/sstatus for an sret into U-mode at `entry`, which
-    // the caller (payload loader) has validated to lie in the arena. SPP=0
-    // selects U-mode; SPIE=1 re-enables interrupts on entry. Diverges.
+    let trap_stack = boot::trap_stack_top();
+    // SAFETY: arming sscratch and the sret must be atomic w.r.t. interrupts.
+    // enter_user runs in S-mode with interrupts enabled (the scheduler is
+    // reached with SPIE=1). If a timer fired between the sscratch write and
+    // the sret, that trap — seeing sscratch != 0 — would be misclassified as
+    // from-U and __kernai_trap would reset sscratch to 0, so the payload
+    // would enter with a desynced sscratch and its next trap would build the
+    // kernel frame on the payload's own stack (a privilege-boundary break).
+    // So: clear sstatus.SIE first (bit 1); sret restores SIE from SPIE=1,
+    // re-enabling interrupts atomically on entry to U-mode. SPP=0 selects
+    // U-mode. `entry` was validated by the loader to lie in the arena.
     unsafe {
         core::arch::asm!(
+            "csrci sstatus, 2",         // clear sstatus.SIE: no trap in the window below
+            "csrw sscratch, {tstack}",  // arm the U-mode trap stack
             "csrw sepc, {entry}",
-            "csrc sstatus, {spp}",
-            "csrs sstatus, {spie}",
+            "csrc sstatus, {spp}",      // SPP = 0 (return to U-mode)
+            "csrs sstatus, {spie}",     // SPIE = 1 (interrupts on after sret)
             "sret",
+            tstack = in(reg) trap_stack,
             entry = in(reg) entry,
             spp = in(reg) SSTATUS_SPP,
             spie = in(reg) SSTATUS_SPIE,

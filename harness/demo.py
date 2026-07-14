@@ -165,6 +165,7 @@ Watch the kernel handle each without a human intervening.
         deadline = time.monotonic() + 60
         while time.monotonic() < deadline:
             e = q.next_event(60)
+            assert e is not None, "kernel exited during M4 suite"
             if e["type"] == "tick":
                 continue
             events.append(e)
