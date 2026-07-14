@@ -62,17 +62,20 @@ cap is fully used; new hal code must extend `hal/csr.rs` / `hal/boot.rs` /
 `hal/trap.rs`, never add a 5th unsafe file. M8 and M9 added no unsafe (`rpc.rs`
 is `#![forbid(unsafe_code)]`; M9 is more JSON fields + a runtime toggle).
 
-Audits so far: M3+M4 (five reviewers) fixed one HIGH (`sscratch` desync). M5
-paging (five reviewers) fixed one HIGH (confused-deputy leak in write) + a LOW.
-M6 (checkpoint) audit returned **clean**. M8 (the JSON-RPC reader) got a
-three-reviewer audit: the parser was proven panic/hang-free (~17.9M exhaustive +
-500K random inputs, zero panics), and three real issues were fixed in the
-M8-hardening commit — a response-overflow silent hang, a command-eating desync,
-and an invalid-numeric-id echo (see DECISIONS.md). M9 is additive diagnostic
-emission (more JSON fields + a runtime surface toggle) with no untrusted parsing
-and no new unsafe, so it was not separately audited; if anything, re-check that
-the enriched fault frame (full register file + pagewalk + ring) still fits the
-2 KiB FrameBuf on the worst-case payload fault (it does today, ~1.6 KiB).
+Audits so far (each adversarial, via parallel reviewer subagents): M3+M4 fixed
+one HIGH (`sscratch` desync). M5 paging fixed one HIGH (confused-deputy leak in
+write) + a LOW. M6 (checkpoint) returned **clean**. M8 (the JSON-RPC reader):
+the parser was proven panic/hang-free (~17.9M exhaustive + 500K random inputs,
+zero panics); three real issues fixed in the M8-hardening commit — a
+response-overflow silent hang, a command-eating desync, an invalid-numeric-id
+echo. M10 (the P10 lattice) returned **clean** (no capability-widening path) + a
+defense-in-depth re-clamp on restore. A final holistic pass (kernel correctness
++ docs/harness consistency) over the whole M0–M12 tree found **no HIGH bugs**;
+its fixes (the `emit_fault` overflow fallback, an `elf.rs` checked_add, and a
+batch of doc/SPEC accuracy fixes) are in the "Final holistic audit" commit. The
+enriched fault frame's reachable worst case is ~1.9 KiB (a page fault) vs the
+2 KiB cap, and `emit_fault` now falls back to a minimal frame on overflow, so a
+fault report can never be silent (the one failure P6 forbids).
 
 Toolchain: nightly-2026-07-14 (rust-toolchain.toml), QEMU 8.2.2
 (`qemu-system-misc`), gdb-multiarch 15.1. `make build` builds the payload
