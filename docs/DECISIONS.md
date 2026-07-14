@@ -384,3 +384,40 @@ lose connections (RFC), so a `run_suite`/`crash` that arrives twice must not run
 twice. 8 slots is a deliberate small window (the fixture double-fires
 back-to-back); a production window would be larger and possibly response-caching,
 logged here rather than blocking M8.
+
+**2026-07-14 · M8 · Adversarial audit of the JSON-RPC surface (3 reviewers) — findings + fixes.**
+The untrusted-input parser got a dedicated audit before M9. The structural JSON
+reader was proven robust: a reviewer compiled a verbatim port and ran ~17.9M
+exhaustive + 500K random inputs with overflow-checks on → zero panics, zero
+hangs (every slice uses `.get(..)?`, every index is bounds-guarded). Three real
+findings were fixed here:
+- **(MED→HIGH) Response overflow → silent hang.** A well-framed request could
+  carry a huge/control-heavy `id`; `write_json_escaped` expands each control
+  byte 6× (`\u00xx`), overflowing the 2 KiB FrameBuf → `emit()` sends nothing →
+  the client waits forever. Fixed two ways: `write_id` clamps the echoed id to
+  64 chars, and `emit_rpc` now checks `FrameBuf::overflowed()` after building
+  and, on overflow, emits a small fixed `"response too large"` error under the
+  same stream id instead of nothing (a general net that also covers future
+  `processes`-table growth; a build-time `assert!(MAX_PROC*128+128 < CAPACITY)`
+  guards that too).
+- **(MED) Command-eating desync.** A crafted `AA 99 <len≤512>` with a withheld
+  body made the blocking reader consume the operator's subsequent command bytes
+  until the frame completed. Fixed with a per-byte STALL bound (`getc_stall`,
+  MAX_STALL_WAITS=16): a real client's bytes arrive steadily so a legit frame of
+  any length never trips it, while a withheld body abandons after ~16 ticks and
+  frees the command plane. A per-byte stall bound was chosen over a total
+  instruction-count deadline because `wait_for_interrupt` advances virtual time
+  ~one tick per call, so a total-time budget wrongly abandons legit multi-wait
+  reads (observed: it wedged even a 40-byte `initialize`).
+- **(LOW) Invalid-but-non-injecting numeric id.** `write_id`'s charset check
+  passed `1.2.3` / `--`, emitting a syntactically invalid JSON number in our own
+  response. Tightened to a strict integer grammar (optional `-` then digits),
+  else `null`. No structural injection was ever possible (the charset excludes
+  `"{}[],:`).
+- **(LOW) `state_name` fallback** changed `_ => "empty"` to `"unknown"` (a
+  never-stored state should not read as an empty slot).
+The idempotency window (8 opId slots) and the id-fidelity note (a genuinely
+escaped string id is re-escaped, so echo isn't byte-identical) were judged
+acceptable and left as documented behavior. Regression coverage for all three
+fixes was added to `runner.py::m8` (big-id answered + clamped, malformed numeric
+id → null, withheld-body recovery).

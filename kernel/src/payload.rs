@@ -761,14 +761,22 @@ fn caps_json(f: &mut FrameBuf, caps: u32) {
 
 fn state_name(s: u8) -> &'static str {
     match s {
+        EMPTY => "empty",
         PENDING => "pending",
         RUNNING => "running",
         EXITED => "exited",
         FAULTED => "faulted",
         KILLED => "killed",
-        _ => "empty",
+        _ => "unknown", // never stored; a false "empty" would mislead an operator
     }
 }
+
+// The `processes` resource must fit one 2 KiB frame (else `emit_rpc` falls back
+// to a "response too large" error instead of the table). Worst case per slot is
+// ~110 bytes (pid + longest name + state + a 20-char signed exit_code + the full
+// caps array); this guard fails the BUILD if MAX_PROC ever grows past what a
+// frame holds, rather than silently truncating at runtime.
+const _: () = assert!(MAX_PROC * 128 + 128 < FrameBuf::CAPACITY);
 
 /// The process table as an MCP resource body (`processes`): every non-empty
 /// slot with its pid, image name, state, exit code, and CapSet. This is the

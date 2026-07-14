@@ -68,6 +68,13 @@ impl FrameBuf {
         Ok(())
     }
 
+    /// True if a write ever overflowed capacity (the frame is poisoned and
+    /// `emit` will send nothing). Lets a caller detect the drop and emit a
+    /// small fixed fallback instead of leaving a client waiting forever.
+    pub fn overflowed(&self) -> bool {
+        self.overflow
+    }
+
     /// Send the frame over the serial link. A poisoned (overflowed) buffer
     /// emits nothing — the absence is the signal.
     pub fn emit(&self) {

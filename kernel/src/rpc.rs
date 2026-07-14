@@ -25,19 +25,37 @@ use crate::console::FrameBuf;
 use crate::{events, hal, payload, traps};
 
 /// Inbound request cap. Requests are tiny (a method + small params); anything
-/// larger is a malformed or hostile frame and is drained + rejected, never
-/// buffered unboundedly.
+/// larger is a malformed or hostile frame and is rejected, never buffered
+/// unboundedly.
 const MAX_REQ: usize = 512;
+
+/// Abandon a partially-read frame after this many consecutive idle waits with
+/// no new byte. This bounds a STALL, not total read time: a real client's
+/// bytes arrive steadily (each resets the counter), so a well-formed frame of
+/// any length up to MAX_REQ never trips it, while a crafted length whose body
+/// is withheld frees the command plane after ~this many ticks instead of
+/// eating the operator's commands until the frame happens to complete. A
+/// per-byte STALL bound is used rather than a total instruction-count deadline
+/// because `wait_for_interrupt` advances virtual time ~one tick per call, so a
+/// total-time budget would abandon legit multi-wait reads.
+const MAX_STALL_WAITS: u32 = 16;
 
 // ---- Frame reader -------------------------------------------------------
 
-/// Block until one serial byte is available. The idle loop already parks on
-/// `wait_for_interrupt`; reuse that so reading a multi-byte request frame does
-/// not busy-spin (timer ticks keep waking us).
-fn getc_blocking() -> u8 {
+/// Read one serial byte, or `None` if no byte arrives within `MAX_STALL_WAITS`
+/// consecutive idle waits. The idle loop already parks on `wait_for_interrupt`;
+/// reuse it so a multi-byte read does not busy-spin (timer ticks keep waking
+/// us). The wait budget is per call, so it bounds how long a *stalled* frame
+/// parks, never how long a steadily-arriving one takes.
+fn getc_stall() -> Option<u8> {
+    let mut idle = 0u32;
     loop {
         if let Some(b) = hal::console_getchar() {
-            return b;
+            return Some(b);
+        }
+        idle += 1;
+        if idle > MAX_STALL_WAITS {
+            return None;
         }
         hal::wait_for_interrupt();
     }
@@ -51,18 +69,23 @@ fn getc_blocking() -> u8 {
 /// Transport-level junk is *silently* dropped and resynced — never answered
 /// with a frame (P-serial: "garbage bytes are ignored"; a reply would both
 /// amplify noise and pollute the input-hardening invariant that only
-/// hello/tick appear). A stray 0xAA in the byte stream therefore costs at most
-/// a handful of consumed bytes, like the host decoder's skip-and-rescan. Only
-/// a well-formed frame carrying a JSON object is dispatched; JSON-RPC-level
-/// problems (unknown method/tool) are answered there, because that frame *was*
-/// a real client request.
+/// hello/tick appear). A stray 0xAA (or a crafted length with a withheld body)
+/// stalls at most `MAX_STALL_WAITS` waits before the reader gives up and
+/// resyncs, so it can never wedge the command plane or eat an unbounded run of
+/// operator command bytes. Only a well-formed frame carrying a JSON object is
+/// dispatched; JSON-RPC-level problems (unknown method/tool) are answered
+/// there, because that frame *was* a real client request.
 pub fn read_request() {
-    if getc_blocking() != 0x99 {
-        return; // stray 0xAA, not our magic — resync silently
+    match getc_stall() {
+        Some(0x99) => {}
+        _ => return, // stray 0xAA (or a stall), not our magic — resync silently
     }
     let mut lenb = [0u8; 4];
     for b in &mut lenb {
-        *b = getc_blocking();
+        let Some(byte) = getc_stall() else {
+            return; // frame stalled: abandon, resync
+        };
+        *b = byte;
     }
     let len = u32::from_le_bytes(lenb) as usize;
     if len == 0 || len > MAX_REQ {
@@ -72,7 +95,10 @@ pub fn read_request() {
     }
     let mut buf = [0u8; MAX_REQ];
     for b in buf.iter_mut().take(len) {
-        *b = getc_blocking();
+        let Some(byte) = getc_stall() else {
+            return; // withheld body: abandon before it eats the command plane
+        };
+        *b = byte;
     }
     let Ok(json) = core::str::from_utf8(&buf[..len]) else {
         return; // not UTF-8: transport junk, drop silently
@@ -167,11 +193,25 @@ fn handle_resources_read(json: &str, id: &str) {
 /// build+emit, like every other emission path (no tick interleave, id fixed).
 fn emit_rpc<F: FnOnce(&mut FrameBuf) -> core::fmt::Result>(body: F) {
     hal::without_interrupts(|| {
+        let id = events::next_id();
         let mut f = FrameBuf::new();
-        let _ = write!(f, r#"{{"id":{},"type":"rpc","rpc":"#, events::next_id());
+        let _ = write!(f, r#"{{"id":{id},"type":"rpc","rpc":"#);
         let _ = body(&mut f);
         let _ = f.write_str("}");
-        f.emit();
+        if f.overflowed() {
+            // The response didn't fit a frame. Emitting nothing would leave the
+            // client waiting forever (a silent hang); instead emit a small
+            // fixed error under the SAME stream id. `id` is nulled because the
+            // client's correlation id may itself be what overflowed.
+            let mut e = FrameBuf::new();
+            let _ = write!(
+                e,
+                r#"{{"id":{id},"type":"rpc","rpc":{{"jsonrpc":"2.0","id":null,"error":{{"code":-32001,"message":"response too large"}}}}}}"#
+            );
+            e.emit();
+        } else {
+            f.emit();
+        }
     });
 }
 
@@ -275,24 +315,37 @@ fn resource(f: &mut FrameBuf, uri: &str, desc: &str) -> core::fmt::Result {
     )
 }
 
-/// Echo the client's request id verbatim but *safely*: re-emit a JSON string
-/// through the escaper, a validated number as-is, anything else as `null`. A
-/// client can never inject structure into our frame through the id field.
+/// Longest client id we echo back. A correlation token needs no more; the
+/// cap stops a client from overflowing the response frame with a huge id
+/// (`write_json_escaped` expands each control byte 6x — see the FrameBuf
+/// audit), which would silently drop the whole response.
+const MAX_ID: usize = 64;
+
+/// Echo the client's request id but *safely*: re-emit a JSON string through
+/// the escaper (length-clamped), a strict JSON integer as-is, anything else as
+/// `null`. A client can neither inject structure into our frame through the id
+/// field nor produce a syntactically invalid id (e.g. `1.2.3`, `--`), nor blow
+/// the frame with a giant id.
 fn write_id(f: &mut FrameBuf, raw: &str) -> core::fmt::Result {
     let raw = raw.trim();
     if let Some(inner) = as_string(raw) {
+        // Clamp to MAX_ID *chars* (never split a UTF-8 code point).
+        let end = inner
+            .char_indices()
+            .nth(MAX_ID)
+            .map_or(inner.len(), |(i, _)| i);
         f.write_str("\"")?;
-        f.write_json_escaped(inner)?;
+        f.write_json_escaped(&inner[..end])?;
         return f.write_str("\"");
     }
-    let numeric = !raw.is_empty()
-        && raw
-            .bytes()
-            .all(|b| b.is_ascii_digit() || matches!(b, b'-' | b'+' | b'.' | b'e' | b'E'));
-    if numeric {
+    // A strict JSON integer: optional leading '-', then one or more digits and
+    // nothing else. Rejects `1.2.3`, `--`, `1e9`, `+1` → `null`, so our own
+    // response is always valid JSON.
+    let digits = raw.strip_prefix('-').unwrap_or(raw);
+    if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) {
         f.write_str(raw)
     } else {
-        f.write_str("null") // includes the literal `null` and any junk
+        f.write_str("null")
     }
 }
 

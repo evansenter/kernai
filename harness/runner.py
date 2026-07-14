@@ -522,6 +522,48 @@ def m8_mcp_control_plane():
         assert m.call("tools/call", {"name": "run_suite", "arguments": {"suite": "zzz"}},
                       collect=seen)["error"]["code"] == -32602
 
+        # Response-safety regressions (from the M8 audit):
+        from .framing import encode_frame
+
+        def next_rpc(timeout=15):
+            while True:
+                fr = q.stream.next_frame(timeout=timeout)
+                assert fr is not None, "EOF waiting for rpc frame"
+                e = json.loads(fr)
+                seen.append(e)
+                if e.get("type") == "rpc":
+                    return e["rpc"]
+
+        # (a) A huge/control-heavy id must NOT silently drop the response (it
+        # used to overflow the frame): the id is clamped and echoed, and the
+        # response still arrives.
+        big_id = chr(1) * 400
+        q.send(encode_frame(('{"id":"' + big_id + '","method":"initialize"}').encode()))
+        r = next_rpc()
+        assert r["result"]["serverInfo"]["name"] == "kernai", f"big-id lost response: {r}"
+        assert isinstance(r["id"], str) and len(r["id"]) <= 64, f"id not clamped: {len(r['id'])}"
+
+        # (b) A malformed numeric id yields valid JSON (id → null), never a
+        # broken frame the host can't parse.
+        q.send(encode_frame(b'{"id":1.2.3,"method":"initialize"}'))
+        r = next_rpc()
+        assert r["id"] is None, f"malformed numeric id not nulled: {r['id']!r}"
+
+        # (c) A crafted length with a withheld body must not wedge the command
+        # plane. Send a header claiming a 64-byte body but no body; the reader
+        # stalls MAX_STALL_WAITS ticks then abandons. Drain well past that
+        # window (ticks keep flowing during the stall — itself proof the kernel
+        # isn't hung), then a normal request is answered again.
+        q.send(b"\xaa\x99\x40\x00\x00\x00")  # magic + len=64, body withheld
+        ticks = 0
+        while ticks < 25:
+            e = json.loads(q.stream.next_frame(timeout=20))
+            seen.append(e)
+            if e["type"] == "tick":
+                ticks += 1
+        alive = m.result("initialize", collect=seen, timeout=20)
+        assert alive["serverInfo"]["name"] == "kernai", "command plane wedged after withheld frame"
+
         # The envelope invariant holds across every frame — control and event
         # alike carry a strictly increasing stream id (P12 spine, determinism).
         ids = [e["id"] for e in seen]
