@@ -650,8 +650,15 @@ fn enqueue_restore(sid: usize) -> Option<usize> {
     }
     for (pid, slot) in TABLE.iter().enumerate() {
         if slot.state.load(RE) == EMPTY {
-            slot.image.store(SNAPS[sid].image.load(RE), RE);
-            slot.caps.store(SNAPS[sid].caps.load(RE), RE);
+            let image = SNAPS[sid].image.load(RE);
+            slot.image.store(image, RE);
+            // Re-clamp to the image ceiling on restore too (defense in depth,
+            // per the M10 attenuation audit): this is the one caps writer that
+            // copies rather than derives, so make the ⊆ ceiling invariant
+            // explicit and self-defending instead of relying on the snapshot
+            // having been clamped upstream.
+            slot.caps
+                .store(SNAPS[sid].caps.load(RE) & IMAGES[image].caps, RE);
             slot.parent.store(NO_PID, RE);
             slot.exit_code.store(0, RE);
             slot.deadline.store(0, RE);

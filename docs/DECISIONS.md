@@ -467,3 +467,22 @@ adds a control-plane spawn, it must carry its own ceiling and respect the same
 lattice; logged here so the invariant isn't quietly broken.) Fixtures:
 `delegator`/`redelegator`/`worker`; suite seeded by `seed_suite_m10`, driven by
 the `d` command byte or MCP `run_suite {suite:"d"}`; asserted by `runner.py::m10`.
+
+**2026-07-14 · M10 · Attenuation audit came back clean; one defense-in-depth fix + a logged non-issue.**
+A dedicated adversarial audit of the P10 lattice (bitmask tricks, chain
+monotonicity, forged parent/selector, snapshot/fork inheritance, slot reuse,
+control-plane injection) found **no capability-widening path**: `granted ⊆
+requested & parent_caps & image_ceiling` holds on every path, caps freeze into a
+child slot at `enqueue` time, high bits (≥3) are erased by the ceiling AND, and
+`spawnable_image` is a closed allowlist whose widest reachable ceiling can only
+restrict. One hardening applied: `enqueue_restore` was the sole caps writer that
+*copied* rather than re-derived, relying on an unstated "snapshot was already
+clamped" invariant — now it re-clamps `& IMAGES[image].caps` explicitly, so the
+⊆-ceiling invariant is self-defending.
+Non-issue logged (PROVISIONAL): `SYS_SNAPSHOT` is not capability-gated. It's not
+a lattice risk (snapshot copies the caller's own attenuated caps and a payload
+cannot self-restore — fork is kernel-triggered via `AUTO_FORK`), only a bounded
+resource matter (returns `EAGAIN`/`ENOMEM` on slot/frame exhaustion). Left
+ungated: snapshot is a self-service checkpoint primitive, and gating it would
+need a `CAP_SNAPSHOT` bit threaded through the images + fixtures for no security
+gain today. Revisit if snapshot authority ever needs delegating.
