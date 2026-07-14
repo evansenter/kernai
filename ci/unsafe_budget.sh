@@ -86,8 +86,16 @@ def strip_comments_and_strings(src: str) -> str:
 
 
 def unsafe_spans(clean: str):
-    """Yield (start_line, end_line) for each unsafe block/fn (1-based)."""
+    """Yield (start_line, end_line) for each unsafe block/fn (1-based).
+
+    Rust 2024 unsafe attributes — `#[unsafe(no_mangle)]` — carry the token
+    but have no body; they count as their own single line."""
     for m in re.finditer(r"\bunsafe\b", clean):
+        rest = clean[m.end():].lstrip()
+        line = clean.count("\n", 0, m.start()) + 1
+        if rest.startswith("("):
+            yield (line, line)
+            continue
         open_brace = clean.find("{", m.end())
         if open_brace == -1:
             continue
@@ -98,7 +106,7 @@ def unsafe_spans(clean: str):
             elif clean[j] == "}":
                 depth -= 1
             j += 1
-        yield (clean.count("\n", 0, m.start()) + 1, clean.count("\n", 0, j) + 1)
+        yield (line, clean.count("\n", 0, j) + 1)
 
 
 def has_safety_comment(raw_lines, unsafe_line):
