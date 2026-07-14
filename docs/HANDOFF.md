@@ -23,9 +23,16 @@ checks in a few seconds:
 8. `demo` — the narrated `make demo` (now M0–M4) completes
 
 CI (`.github/workflows/ci.yml`) runs the same gate + `ci/unsafe_budget.sh`
-on every push. **Unsafe budget: 56/200 lines in 4/4 hal files** — the file
+on every push. **Unsafe budget: 59/200 lines in 4/4 hal files** — the file
 cap is fully used; M5's paging code must extend `hal/csr.rs` / `hal/boot.rs`
 / `hal/trap.rs`, never add a 5th unsafe file.
+
+M3+M4 were adversarially audited by five parallel reviewers (trap/privilege
+asm, ELF loader, capability soundness, hal unsafe/budget, acceptance rigor).
+One HIGH (an `sscratch` desync race in `enter_user` that could put the kernel
+trap frame on a payload's stack) and several LOW findings were fixed — see
+the last DECISIONS.md entry. No capability-widening path, sound arena
+bounds-checking, zero flakiness.
 
 Toolchain: nightly-2026-07-14 (rust-toolchain.toml), QEMU 8.2.2
 (`qemu-system-misc`), gdb-multiarch 15.1. `make build` builds the payload
