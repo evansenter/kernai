@@ -1,3 +1,6 @@
 target/
 __pycache__/
 *.pyc
+
+# editor/tool temp files
+*.tmp.*

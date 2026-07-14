@@ -1,0 +1,9 @@
+[workspace]
+resolver = "2"
+members = ["sys", "hello", "crasher"]
+
+[profile.release]
+panic = "abort"
+lto = true
+codegen-units = 1
+debug = true
