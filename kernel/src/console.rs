@@ -93,6 +93,22 @@ impl FrameBuf {
     }
 }
 
+/// Write a raw, UN-framed line straight to the console — the classic
+/// diagnostic surface (the P6/E1 twin). No magic, no length prefix, no JSON: a
+/// legacy kernel's printk. Lands in the host decoder's noise channel, exactly
+/// where a real operator would have to read a console log. `write!` into it,
+/// under `without_interrupts`, so a framed tick can't split the line.
+pub struct RawConsole;
+
+impl Write for RawConsole {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        for b in s.bytes() {
+            hal::console_putchar(b);
+        }
+        Ok(())
+    }
+}
+
 impl Write for FrameBuf {
     fn write_str(&mut self, s: &str) -> fmt::Result {
         let bytes = s.as_bytes();

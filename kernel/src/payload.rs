@@ -216,6 +216,10 @@ struct Slot {
     /// Pool frame holding a saved trap frame to resume from (M6 restore);
     /// 0 = start fresh from the ELF entry.
     resume_frame: AtomicUsize,
+    /// Event id of this payload's `payload_start` (P12 causal spine): every
+    /// event this payload produces — output, exit, fault, kill — names it as
+    /// its `caused_by`, so the log is a DAG rooted at the start, not a line.
+    start_event: AtomicU64,
 }
 
 impl Slot {
@@ -230,6 +234,7 @@ impl Slot {
             deadline: AtomicU64::new(0),
             root: AtomicUsize::new(0),
             resume_frame: AtomicUsize::new(0),
+            start_event: AtomicU64::new(0),
         }
     }
 }
@@ -512,6 +517,13 @@ pub fn current_pagewalk(va: usize) -> Option<mm::WalkChain> {
     Some(current_space()?.walk(va))
 }
 
+/// The `payload_start` event id of the running payload (P12 causal parent for
+/// its fault frame). None if no payload is running (a kernel fault has no
+/// payload cause).
+pub fn current_cause() -> Option<u64> {
+    Some(TABLE[current_pid()?].start_event.load(RE))
+}
+
 pub fn on_exit(code: usize) {
     if let NO_PID = CURRENT.load(RE) {
         return;
@@ -720,6 +732,7 @@ pub fn emit_output(ptr: usize, len: usize) -> Result<(), ()> {
         return Err(());
     }
     let pid = current_pid().unwrap_or(NO_PID);
+    let caused_by = TABLE.get(pid).map_or(0, |s| s.start_event.load(RE));
     hal::without_interrupts(|| {
         let mut f = FrameBuf::new();
         // "untrusted":true and the bytes confined to a JSON string are the
@@ -727,7 +740,7 @@ pub fn emit_output(ptr: usize, len: usize) -> Result<(), ()> {
         // operator as kernel-issued instructions.
         let _ = write!(
             f,
-            r#"{{"id":{},"type":"payload_output","pid":{pid},"untrusted":true,"len":{n},"data":""#,
+            r#"{{"id":{},"type":"payload_output","pid":{pid},"untrusted":true,"caused_by":{caused_by},"len":{n},"data":""#,
             events::next_id()
         );
         let _ = f.write_json_escaped_bytes(&buf[..n]);
@@ -852,12 +865,24 @@ pub fn write_spec(f: &mut FrameBuf) -> core::fmt::Result {
 
 fn emit_start(pid: usize, name: &str, caps: u32, entry: usize, restored: bool) {
     hal::without_interrupts(|| {
+        // Record this start as the causal root of everything this payload does
+        // (P12). A spawned child names its parent's start as *its* cause, so a
+        // delegation chain is a real path in the DAG; a top-level payload has
+        // no in-band cause event, so `caused_by` is null (the operator).
+        let ev = events::next_id();
+        TABLE[pid].start_event.store(ev, RE);
+        let parent = TABLE[pid].parent.load(RE);
         let mut f = FrameBuf::new();
         let _ = write!(
             f,
-            r#"{{"id":{},"type":"payload_start","pid":{pid},"name":"{name}","entry":"0x{entry:x}","restored":{restored},"caps":"#,
-            events::next_id()
+            r#"{{"id":{ev},"type":"payload_start","pid":{pid},"name":"{name}","entry":"0x{entry:x}","restored":{restored},"caused_by":"#,
         );
+        if parent != NO_PID {
+            let _ = write!(f, "{}", TABLE[parent].start_event.load(RE));
+        } else {
+            let _ = f.write_str("null");
+        }
+        let _ = f.write_str(r#","caps":"#);
         caps_json(&mut f, caps);
         let _ = f.write_str("}");
         f.emit();
@@ -881,8 +906,9 @@ fn emit_exit(pid: usize, code: isize) {
         let mut f = FrameBuf::new();
         let _ = write!(
             f,
-            r#"{{"id":{},"type":"payload_exit","pid":{pid},"code":{code}}}"#,
-            events::next_id()
+            r#"{{"id":{},"type":"payload_exit","pid":{pid},"code":{code},"caused_by":{}}}"#,
+            events::next_id(),
+            TABLE[pid].start_event.load(RE),
         );
         f.emit();
     });
@@ -951,8 +977,9 @@ fn emit_killed(pid: usize, elapsed: u64, deadline: u64) {
         let mut f = FrameBuf::new();
         let _ = write!(
             f,
-            r#"{{"id":{},"type":"payload_killed","pid":{pid},"reason":"deadline","elapsed":{elapsed},"deadline":{deadline}}}"#,
-            events::next_id()
+            r#"{{"id":{},"type":"payload_killed","pid":{pid},"reason":"deadline","elapsed":{elapsed},"deadline":{deadline},"caused_by":{}}}"#,
+            events::next_id(),
+            TABLE[pid].start_event.load(RE),
         );
         f.emit();
     });

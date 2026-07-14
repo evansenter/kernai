@@ -1,4 +1,4 @@
-# Architecture (current: M8)
+# Architecture (current: M9)
 
 One page, always accurate. Principles P1–P12 are defined in
 `RFC-001-agent-native-kernel.md`. Beginner-level narrative: `WALKTHROUGH.md`.
@@ -12,7 +12,7 @@ host (Python, stdlib only)                guest (qemu -machine virt, -icount)
 │ transport.py FrameStream      │ frames  │   ▲ ecall: putchar getchar        │
 │ qemu.py     THE qemu cmdline  │◄────────│   │        set_timer SRST         │
 │ runner.py   acceptance gates  │ cmds    │ kernel (S-mode, 0x80200000)       │
-│ demo.py     narrated tour     │────────►│ ┌ hal/ (unsafe island, 71/200) ─┐ │
+│ demo.py     narrated tour     │────────►│ ┌ hal/ (unsafe island, 55/200) ─┐ │
 └──────────────────────────────┘ rxpmi   │ │ boot.rs entry, bss, phys i/o  │ │
                                           │ │ sbi.rs  ecall wrappers        │ │
  frames: AA 99 | u32 LE len | JSON        │ │ csr.rs  CSRs, satp, sscratch  │ │
@@ -70,7 +70,7 @@ next. Queue drains → `suite_done` → `idle`.
 - **Determinism (P9)**: one QEMU command line (`harness/qemu.py`). Input-free
   boots are byte-identical; the deadline kill lands at the same instruction
   every run under identical input timing.
-- **Unsafe island**: `hal/` only, 71/200 budget lines, 4/4 files (at the file
+- **Unsafe island**: `hal/` only, 55/200 budget lines, 4/4 files (at the file
   cap — new hal code extends existing files). ELF loading, page tables, the
   frame allocator, the process table, the scheduler, and all policy are safe
   code. Physical-frame access is safe: `hal::phys_*` bounds-check every access
@@ -114,7 +114,15 @@ next. Queue drains → `suite_done` → `idle`.
   the crash) is logged to an `rrfile`; replaying with no live input reproduces
   every event frame bit-for-bit (`runner.py::m7`). No kernel change — QEMU logs
   each input at the instruction count it was consumed and re-injects it there.
-- **P6/E1 (M9, next)**: the payload `fault` frame already carries the
-  page-table walk; M9 grows it (richer registers, a `cause` parent id — P12)
-  and adds the `surface-classic` printf twin so E1 can A/B how fast an agent
-  localizes a bug from structured frames vs. a log dump.
+- **P6/P12/E1 (M9, done)**: the `fault` frame now carries the full register
+  file (`regs`, 31 ABI-named GPRs) and a P12 causal parent (`caused_by` — the
+  `payload_start` it descends from; threaded through every payload lifecycle
+  event so the log is a DAG). The `surface-classic` twin is a runtime toggle
+  (`set_surface` tool / `surface` resource): the same fault renders as one
+  printf `[FAULT] …` console line (`traps::emit_fault_classic` via `RawConsole`,
+  unframed → the host noise channel) instead of the rich frame — the A/B
+  substrate for E1. Scope: M9 twins the diagnostic path; a fully classic event
+  stream is M12 eval machinery.
+- **P10/P3 (M10/M11, next)**: harden the delegation/attenuation lattice against
+  an adversarial spawn chain and the MCP surface (M10); then event coalescing +
+  token-budgeted observability (`?budget=Ntok`, P3) and an autonomy dial (M11).

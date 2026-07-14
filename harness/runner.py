@@ -581,6 +581,78 @@ def m8_mcp_control_plane():
         assert saw_fault, "crash tool did not produce a fault before shutdown"
 
 
+@milestone("m9")
+def m9_diagnostic_frames_and_classic_twin():
+    """Rich diagnostic frames + the surface-classic twin (P6/E1). The agentic
+    fault frame carries the full register file and a P12 causal parent
+    (`caused_by`, linking the fault to the payload_start it descends from). The
+    same fault, on the classic surface (toggled over the control plane), renders
+    as one printf-style console line instead — the A/B substrate for E1."""
+    from .mcp import Mcp
+    from .qemu import QemuKernel
+
+    ABI_REGS = {"ra", "sp", "gp", "tp", "a0", "a7", "s0", "t6"}
+
+    def run_p(m, q):
+        """Run the M3 suite over MCP; return (events, crasher_fault_or_None)."""
+        m.result("tools/call", {"name": "run_suite", "arguments": {"suite": "p"}})
+        events, fault = [], None
+        while True:
+            e = json.loads(q.stream.next_frame(timeout=30))
+            events.append(e)
+            if e["type"] == "fault":
+                fault = e
+            if e["type"] == "suite_done":
+                return events, fault
+
+    with QemuKernel() as q:
+        assert json.loads(q.stream.next_frame(timeout=60))["type"] == "hello"
+        m = Mcp(q)
+
+        # Agentic surface (default): the enriched P6 fault frame.
+        events, fault = run_p(m, q)
+        assert fault is not None and fault["origin"] == "payload", f"no payload fault: {fault}"
+        # Full register file, ABI-named.
+        regs = fault.get("regs", {})
+        assert len(regs) == 31, f"expected 31 GPRs, got {len(regs)}: {regs}"
+        assert ABI_REGS <= set(regs), f"missing ABI registers: {ABI_REGS - set(regs)}"
+        assert all(v.startswith("0x") for v in regs.values()), f"regs not hex: {regs}"
+        # P12 causal parent: the fault names the crasher's payload_start.
+        crasher_start = next(e for e in events
+                             if e["type"] == "payload_start" and e["name"] == "crasher")
+        assert fault["caused_by"] == crasher_start["id"], \
+            f"fault caused_by {fault['caused_by']} != crasher start {crasher_start['id']}"
+        # The causal edge threads through the lifecycle events too.
+        crasher_exit_or_out = [e for e in events
+                               if e.get("caused_by") == crasher_start["id"]
+                               and e["type"] != "fault"]
+        assert crasher_exit_or_out, "no lifecycle events linked to the crasher start"
+        assert crasher_start["caused_by"] is None, "a top-level payload has no cause"
+
+        # Toggle to the classic surface over the control plane.
+        assert m.result("tools/call",
+                        {"name": "set_surface", "arguments": {"mode": "classic"}})["surface"] == "classic"
+        assert m.result("resources/read", {"uri": "surface"})["surface"] == "classic"
+
+        # Same suite, classic surface: the crasher's fault must NOT be a
+        # structured frame now — it renders as a raw console line (noise).
+        events2, fault2 = run_p(m, q)
+        assert fault2 is None, f"classic surface still emitted a structured fault frame: {fault2}"
+        noise = bytes(q.stream.decoder.noise).decode(errors="replace")
+        classic = [ln for ln in noise.splitlines() if "[FAULT]" in ln]
+        assert classic, "classic surface produced no printf fault line"
+        line = classic[-1]
+        # The classic line carries the same core facts as the frame did.
+        assert "payload" in line and "illegal_instruction" in line, f"classic line thin: {line}"
+        assert "pc=0x" in line and "stval=0x" in line, f"classic line missing facts: {line}"
+
+        # Toggle back; the surface is operator-selectable, not a build flag.
+        assert m.result("tools/call",
+                        {"name": "set_surface", "arguments": {"mode": "agentic"}})["surface"] == "agentic"
+        _, fault3 = run_p(m, q)
+        assert fault3 is not None and "regs" in fault3, "agentic surface did not restore"
+
+
 @milestone("determinism")
 def determinism_two_boots():
     """P9 seed (E6): two input-free boots yield byte-identical event streams."""

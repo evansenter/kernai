@@ -421,3 +421,33 @@ escaped string id is re-escaped, so echo isn't byte-identical) were judged
 acceptable and left as documented behavior. Regression coverage for all three
 fixes was added to `runner.py::m8` (big-id answered + clamped, malformed numeric
 id → null, withheld-body recovery).
+
+**2026-07-14 · M9 · Fault frame grows the full register file + a P12 causal parent (`caused_by`).**
+The v0 fault frame showed only ra/sp; P6 wants "the frame alone is sufficient
+to localize the bug". M9 adds `regs`: all 31 GPRs, ABI-named (ra/sp/gp/tp/t0…/
+a0…a7/s0…s11/t3…t6), so an agent has the argument/temp/saved state a debugger
+would otherwise be needed for. It also adds `caused_by` (P12 causal spine): each
+payload records its `payload_start` event id, and its output/exit/fault/killed
+events — and the fault frame — name it, so the log is a DAG rooted at the start,
+not a flat line. A spawned child's start names the parent's start (a delegation
+chain is a real path); a top-level payload's `caused_by` is null (the operator,
+who has no in-band event). A kernel fault's `caused_by` is null. The frame's
+existing `cause` field (the scause hex) is unchanged and distinct from
+`caused_by` (the parent event) — different axes (what vs. why-here).
+
+**2026-07-14 · M9 · PROVISIONAL · The surface-classic twin is a runtime toggle on the diagnostic path, not a second build.**
+E1 needs the SAME fault rendered two ways: the rich agentic frame vs. a classic
+printf line. Implemented as a runtime surface selector (`traps::CLASSIC_SURFACE`)
+toggled over the control plane (`set_surface {classic|agentic}` tool, `surface`
+resource), so one binary serves both arms and an operator flips between them
+mid-session — exactly the A/B E1 runs. On the classic surface `emit_fault`
+renders one dense, unframed `[FAULT] origin cause pc=… stval=… ra=… sp=…` line
+via `RawConsole` (no frame, no id, no register file, no page-table walk, no ring
+— deliberately the poorer surface), which lands in the host decoder's noise
+channel like a legacy kernel's printk. Scope note: M9 twins the DIAGNOSTIC path
+(the E1 stimulus) only; the rest of the event stream stays structured. A fully
+classic surface (printf for every event, errno returns, no events at all — the
+RFC's `surface-classic`) is E-suite machinery deferred to M12, where the A/B is
+run end-to-end. Chosen over a cargo feature (two builds) because a runtime
+toggle keeps `make test` single-binary and lets one recorded session compare
+both surfaces.

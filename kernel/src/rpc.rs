@@ -170,6 +170,20 @@ fn handle_tools_call(json: &str, id: &str) {
             hal::trigger_illegal_instruction(); // diverges: fault → shutdown
         }
         Some("ring_read") => respond_result(id, traps::write_ring_resource),
+        Some("set_surface") => {
+            let args = object_get(params, "arguments").unwrap_or("{}");
+            match object_get(args, "mode").and_then(as_string) {
+                Some("classic") => {
+                    traps::set_classic_surface(true);
+                    respond_result(id, |f| f.write_str(r#"{"surface":"classic"}"#));
+                }
+                Some("agentic") => {
+                    traps::set_classic_surface(false);
+                    respond_result(id, |f| f.write_str(r#"{"surface":"agentic"}"#));
+                }
+                _ => respond_error(id, -32602, "mode must be classic|agentic"),
+            }
+        }
         Some(_) => respond_error(id, -32602, "unknown tool"),
         None => respond_error(id, -32602, "missing tool name"),
     }
@@ -181,6 +195,14 @@ fn handle_resources_read(json: &str, id: &str) {
         Some("trap_ring") => respond_result(id, traps::write_ring_resource),
         Some("processes") => respond_result(id, payload::write_process_table),
         Some("spec") => respond_result(id, payload::write_spec),
+        Some("surface") => respond_result(id, |f| {
+            let mode = if traps::classic_surface() {
+                "classic"
+            } else {
+                "agentic"
+            };
+            write!(f, r#"{{"surface":"{mode}"}}"#)
+        }),
         Some(_) => respond_error(id, -32602, "unknown resource"),
         None => respond_error(id, -32602, "missing uri"),
     }
@@ -266,28 +288,38 @@ fn respond_tools_list(id: &str) {
             f,
             "run_suite",
             "Run a payload acceptance suite (p|m|i|f).",
-            true,
+            Some("suite"),
         )?;
         f.write_str(",")?;
         tool(
             f,
             "crash",
             "Trigger a deliberate kernel fault → shutdown.",
-            false,
+            None,
         )?;
         f.write_str(",")?;
-        tool(f, "ring_read", "Read the trap ring buffer.", false)?;
+        tool(f, "ring_read", "Read the trap ring buffer.", None)?;
+        f.write_str(",")?;
+        tool(
+            f,
+            "set_surface",
+            "Select the diagnostic surface: classic|agentic (P6/E1).",
+            Some("mode"),
+        )?;
         f.write_str("]}")
     });
 }
 
-fn tool(f: &mut FrameBuf, name: &str, desc: &str, takes_suite: bool) -> core::fmt::Result {
+fn tool(f: &mut FrameBuf, name: &str, desc: &str, prop: Option<&str>) -> core::fmt::Result {
     write!(
         f,
         r#"{{"name":"{name}","description":"{desc}","inputSchema":{{"type":"object""#
     )?;
-    if takes_suite {
-        f.write_str(r#","properties":{"suite":{"type":"string"}},"required":["suite"]"#)?;
+    if let Some(p) = prop {
+        write!(
+            f,
+            r#","properties":{{"{p}":{{"type":"string"}}}},"required":["{p}"]"#
+        )?;
     }
     f.write_str("}}")
 }
@@ -303,6 +335,12 @@ fn respond_resources_list(id: &str) {
             f,
             "spec",
             "Self-describing surface: syscalls, caps, memory map (P5).",
+        )?;
+        f.write_str(",")?;
+        resource(
+            f,
+            "surface",
+            "The active diagnostic surface (classic|agentic).",
         )?;
         f.write_str("]}")
     });

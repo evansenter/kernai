@@ -5,7 +5,7 @@ beyond this repo (we dogfood E3 on ourselves).
 
 ## Current state (2026-07-14, session 2)
 
-**M0–M8 complete and green.** `make test` from a fresh clone runs twelve
+**M0–M9 complete and green.** `make test` from a fresh clone runs thirteen
 checks in ~8 seconds (fmt + clippy + build + unsafe budget first):
 
 1. `m0` — framing round-trips over a real pipe (loopback stub)
@@ -32,23 +32,31 @@ checks in ~8 seconds (fmt + clippy + build + unsafe budget first):
     whose events stream to `suite_done`, client-`opId` idempotency (a replayed
     mutating call runs once), structured errors, all with stream ids strictly
     monotonic across control + event frames
-11. `determinism` — two input-free boots byte-identical (P9 / E6 seed)
-12. `demo` — the narrated `make demo` (now 10 acts, incl. the MCP act)
+11. `m9` — rich diagnostic frames + the surface-classic twin (P6/E1): the
+    agentic fault frame carries the full 31-register file + a P12 `caused_by`
+    causal parent (the `payload_start` it descends from, threaded through the
+    lifecycle events); the same fault on the classic surface (toggled via the
+    `set_surface` tool) renders as one printf `[FAULT] …` console line
+12. `determinism` — two input-free boots byte-identical (P9 / E6 seed)
+13. `demo` — the narrated `make demo` (now 11 acts, incl. MCP + two-surface)
 
 CI (`.github/workflows/ci.yml`) runs the same gate + `ci/unsafe_budget.sh`
 on every push. **Unsafe budget: 55/200 lines in 4/4 hal files** — the file
 cap is fully used; new hal code must extend `hal/csr.rs` / `hal/boot.rs` /
-`hal/trap.rs`, never add a 5th unsafe file. M8 added no unsafe (`rpc.rs` is
-`#![forbid(unsafe_code)]`: a hand-rolled structural JSON reader, no serde).
+`hal/trap.rs`, never add a 5th unsafe file. M8 and M9 added no unsafe (`rpc.rs`
+is `#![forbid(unsafe_code)]`; M9 is more JSON fields + a runtime toggle).
 
 Audits so far: M3+M4 (five reviewers) fixed one HIGH (`sscratch` desync). M5
 paging (five reviewers) fixed one HIGH (confused-deputy leak in write) + a LOW.
-M6 (checkpoint) audit returned **clean**. **M8 (the JSON-RPC reader) is new and
-should be audited next** — it parses untrusted host input; scrutinize the
-structural scanner (`skip_container`/`object_get` bounds, unbalanced/nested/
-truncated inputs), the frame-length/desync handling (a bogus length must never
-hang or over-read), the id-echo escaping (no structure injection through the
-correlation id), and the idempotency window.
+M6 (checkpoint) audit returned **clean**. M8 (the JSON-RPC reader) got a
+three-reviewer audit: the parser was proven panic/hang-free (~17.9M exhaustive +
+500K random inputs, zero panics), and three real issues were fixed in the
+M8-hardening commit — a response-overflow silent hang, a command-eating desync,
+and an invalid-numeric-id echo (see DECISIONS.md). M9 is additive diagnostic
+emission (more JSON fields + a runtime surface toggle) with no untrusted parsing
+and no new unsafe, so it was not separately audited; if anything, re-check that
+the enriched fault frame (full register file + pagewalk + ring) still fits the
+2 KiB FrameBuf on the worst-case payload fault (it does today, ~1.6 KiB).
 
 Toolchain: nightly-2026-07-14 (rust-toolchain.toml), QEMU 8.2.2
 (`qemu-system-misc`), gdb-multiarch 15.1. `make build` builds the payload
@@ -64,9 +72,10 @@ the local working tree is not durable.
 
 Single command bytes: `r` ring · `x` crash · `p`/`m`/`i`/`f` the M3–M6 suites.
 Or drive it structured: a `0xAA`-led length-prefixed frame carrying JSON-RPC
-(MCP) — `initialize`, `tools/list`, `tools/call {run_suite|crash|ring_read}`,
-`resources/list`, `resources/read {trap_ring|processes|spec}`. See
-`harness/mcp.py` for the client and `runner.py::m8` for a full session.
+(MCP) — `initialize`, `tools/list`, `tools/call {run_suite|crash|ring_read|
+set_surface}`, `resources/list`, `resources/read {trap_ring|processes|spec|
+surface}`. See `harness/mcp.py` for the client and `runner.py::m8`/`m9` for full
+sessions.
 
 ## Known-broken / caveats
 
@@ -87,20 +96,32 @@ Or drive it structured: a `0xAA`-led length-prefixed frame carrying JSON-RPC
 
 ## Exact next step
 
-**M9: rich diagnostic frames + the `surface-classic` twin (P6, E1).** Per the
-RFC ladder. The fault frame is already the v0 P6 diagnostic (cause, sepc,
-decoded instruction, ring history, page-table walk). M9:
+**M10: delegation/attenuation hardening (P10).** Per the RFC ladder. The
+attenuation lattice (`granted = requested & parent_caps & image_ceiling`) is
+enforced in `payload::on_spawn`, and the M4 audit already covered the direct
+spawn path. M10 pushes on it adversarially:
 
-1. Grow the frame: the full register file (not just ra/sp), a `cause` parent
-   event id (P12 — link the fault to the syscall/tick that preceded it), and
-   any symbolization the payload ELF affords (map sepc → segment/offset).
-2. Build the `surface-classic` twin: the SAME kernel able to emit a
-   traditional unstructured printf-style log line for the same fault, behind a
-   build flag or an MCP toggle. This is the A/B substrate for **E1** (does an
-   agent localize a bug faster from structured frames than a log dump?).
-3. Acceptance: an M9 check asserting the enriched frame's new fields and that
-   the classic twin carries the same underlying facts in prose. Add to
-   `make test`.
+1. Deeper chains: today `spawner → child` is one level. Add a fixture that
+   spawns a grandchild (a child that itself spawns), and assert caps can only
+   ever shrink along the whole chain — never re-widen at any hop.
+2. The MCP surface as an attenuation vector: can a control-plane caller grant
+   caps a payload couldn't grant itself? (Today `spawn` is payload-only; if M10
+   adds a `spawn` *tool*, it must respect the same lattice, and probably a
+   control-plane ceiling.) Decide and log whether the operator is “root” or is
+   itself capability-bounded.
+3. Adversarial audit (this is a security milestone — follow the M4/M5/M8
+   pattern): a fixture battery that tries to widen caps via spawn ordering,
+   integer tricks on the caps bitmask, reused/forged pids, and the snapshot/
+   fork path (does a forked continuation inherit exactly the parent’s CapSet,
+   no more?). 
+4. Acceptance: an `m10` check proving a multi-hop delegation chain monotonically
+   attenuates and every widening attempt is refused. Add to `make test`.
+
+Then M11 (autonomy dial + P3 token-budgeted event summaries — `?budget=Ntok`
+returns a coalesced digest, not the firehose) and M12 (the E1–E8 eval suite:
+wire the M9 two-surface toggle into an actual A/B harness with a seeded-bug
+stimulus set, plus E2/E3/E5). After the ladder, expand per the RFC's spirit —
+the eval suite as a public benchmark, the MCP surface published as the spec.
 
 Then M10 (delegation/attenuation hardening — an adversarial pass on the P10
 lattice and the MCP surface), M11 (autonomy dial + P3 event budgets:

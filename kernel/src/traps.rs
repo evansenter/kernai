@@ -8,10 +8,27 @@
 //! sepc, decoded instruction fields, recent trap history.
 
 use core::fmt::Write;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use crate::console::FrameBuf;
+use crate::console::{FrameBuf, RawConsole};
 use crate::{events, hal};
+
+/// Diagnostic surface selector (P6/E1). Default (false) = the agentic surface:
+/// the rich structured fault frame. When true, the *same* fault renders as a
+/// single printf-style console line instead (`emit_fault_classic`) — the E1
+/// A/B twin, so we can measure whether the surface, not the agent, decides how
+/// fast a bug is localized. Toggled over the control plane (`set_surface`).
+static CLASSIC_SURFACE: AtomicBool = AtomicBool::new(false);
+
+/// Select the classic (true) or agentic (false) diagnostic surface.
+pub fn set_classic_surface(on: bool) {
+    CLASSIC_SURFACE.store(on, Ordering::Relaxed);
+}
+
+/// True if faults currently render on the classic printf surface.
+pub fn classic_surface() -> bool {
+    CLASSIC_SURFACE.load(Ordering::Relaxed)
+}
 
 /// Timer cadence in timebase units (10 MHz on qemu-virt). Under
 /// `-icount shift=1` (2 ns per instruction) one unit is 50 instructions, so
@@ -309,7 +326,14 @@ pub fn write_ring_resource(f: &mut FrameBuf) -> core::fmt::Result {
 /// and `None` for a kernel fault (origin "kernel", shutdown follows). The
 /// frame shape is identical either way — an operator diagnoses both the same.
 fn emit_fault(frame: &TrapFrame, id: u64, scause: u64, stval: u64, pid: Option<usize>) {
+    if classic_surface() {
+        return emit_fault_classic(frame, scause, stval, pid);
+    }
     let mut f = FrameBuf::new();
+    // caused_by (P12): the payload_start this fault descends from, or null for
+    // a kernel fault (no payload cause). Emitted first so the frame is a node
+    // in the causal DAG, not an orphan.
+    let caused_by = pid.and(crate::payload::current_cause());
     match pid {
         Some(pid) => {
             let _ = write!(
@@ -321,14 +345,25 @@ fn emit_fault(frame: &TrapFrame, id: u64, scause: u64, stval: u64, pid: Option<u
             let _ = write!(f, r#"{{"id":{id},"type":"fault","origin":"kernel","#);
         }
     }
+    let _ = f.write_str(r#""caused_by":"#);
+    match caused_by {
+        Some(ev) => {
+            let _ = write!(f, "{ev}");
+        }
+        None => {
+            let _ = f.write_str("null");
+        }
+    }
     let _ = write!(
         f,
-        r#""cause":"0x{scause:x}","cause_name":"{}","sepc":"0x{:x}","stval":"0x{stval:x}","ra":"0x{:x}","sp":"0x{:x}","insn":"#,
+        r#","cause":"0x{scause:x}","cause_name":"{}","sepc":"0x{:x}","stval":"0x{stval:x}","ra":"0x{:x}","sp":"0x{:x}","regs":"#,
         cause_name(scause),
         frame.sepc,
         frame.x(1),
         frame.x(2),
     );
+    let _ = write_regs(&mut f, frame);
+    let _ = f.write_str(r#","insn":"#);
     if scause == CAUSE_ILLEGAL_INSTRUCTION && stval != 0 {
         // On illegal instruction QEMU puts the offending encoding in stval.
         let _ = write!(
@@ -364,6 +399,46 @@ fn emit_fault(frame: &TrapFrame, id: u64, scause: u64, stval: u64, pid: Option<u
     let _ = write_ring(&mut f);
     let _ = f.write_str("}");
     f.emit();
+}
+
+/// The 31 GPRs, ABI-named, as a JSON object — P6's full faulting register file.
+/// An agent localizing a bug usually needs the argument/temp/saved registers,
+/// not just ra/sp; withholding them is exactly the debugger dependency P6 aims
+/// to remove.
+fn write_regs(f: &mut FrameBuf, frame: &TrapFrame) -> core::fmt::Result {
+    // NAMES[i] is the ABI name of x(i+1): NAMES[0]=ra=x1 … NAMES[30]=t6=x31.
+    const NAMES: [&str; 31] = [
+        "ra", "sp", "gp", "tp", "t0", "t1", "t2", "s0", "s1", "a0", "a1", "a2", "a3", "a4", "a5",
+        "a6", "a7", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11", "t3", "t4", "t5",
+        "t6",
+    ];
+    f.write_str("{")?;
+    for (i, name) in NAMES.iter().enumerate() {
+        if i > 0 {
+            f.write_str(",")?;
+        }
+        write!(f, r#""{name}":"0x{:x}""#, frame.x(i + 1))?;
+    }
+    f.write_str("}")
+}
+
+/// The classic diagnostic surface (P6/E1 twin): the SAME fault as one dense,
+/// unstructured printf-style console line — no frame, no id, no register file,
+/// no page-table walk, no ring history. Deliberately the poorer surface, so E1
+/// can measure how much the structured frame actually buys an agent. Emitted
+/// raw (unframed) under masked interrupts so a framed tick can't split it.
+fn emit_fault_classic(frame: &TrapFrame, scause: u64, stval: u64, pid: Option<usize>) {
+    hal::without_interrupts(|| {
+        let origin = if pid.is_some() { "payload" } else { "kernel" };
+        let _ = writeln!(
+            RawConsole,
+            "[FAULT] {origin} {} pc=0x{:x} stval=0x{stval:x} ra=0x{:x} sp=0x{:x}",
+            cause_name(scause),
+            frame.sepc,
+            frame.x(1),
+            frame.x(2),
+        );
+    });
 }
 
 /// Append the current payload's page-table walk for `va` as a JSON array of
