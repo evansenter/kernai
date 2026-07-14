@@ -39,3 +39,26 @@ stripped, brace-matched spans) so it runs toolchain-free before any build.
 clippy's `undocumented_unsafe_blocks = deny` (kernel Cargo.toml) remains the
 authoritative SAFETY-comment check; the RFC's `cargo geiger` suggestion adds
 a dependency for little over this and can be revisited at M5+.
+
+**2026-07-14 · M1 · PROVISIONAL · SBI legacy console putchar, not DBCN.**
+Both exist in QEMU's OpenSBI 1.3. Legacy putchar (EID 0x01) is one
+byte per ecall — slow but universal and impossible to misuse; DBCN batching
+is an optimization the dumb serial layer doesn't need yet. Revisit when
+frame volume grows (M8), behind the same `console_putchar` seam.
+
+**2026-07-14 · M1 · PROVISIONAL · Frames ride the SBI console UART until M8.**
+The RFC says "MCP over virtio-serial"; a virtio driver is real work that
+buys nothing before the MCP layer exists. The harness framing is
+transport-agnostic (FrameStream reads any fd), so swapping the UART for
+virtio-serial at M8 touches no framing or event code. Until then `-serial
+stdio` is the wire.
+
+**2026-07-14 · M1 · Kernel has zero crate dependencies.**
+core only — no riscv/sbi/spin crates. The unsafe they'd wrap is exactly the
+unsafe we're budgeting in hal/, and vendored abstractions would hide it from
+ci/unsafe_budget.sh. Costs us ~40 lines of hand-written ecall/CSR wrappers.
+
+**2026-07-14 · M1 · FrameBuf overflow poisons the frame instead of truncating.**
+A truncated JSON diagnostic parses as garbage or, worse, parses clean with
+missing fields; an absent frame is unambiguous. Buffer is 1 KiB; events are
+designed small (P3 — operator attention is metered).
