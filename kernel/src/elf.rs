@@ -154,11 +154,17 @@ fn map_segment(
         .ok_or(ElfError::BadProgramHeaders)?;
     let mut page = vaddr - (vaddr % mm::PAGE_SIZE);
     while page < seg_end {
+        // Checked so a crafted VA-top segment is a structured Err, never an
+        // arithmetic-overflow panic — the loader promises no panic in any build
+        // profile (M9 leans on that for hostile-image fuzzing).
+        let page_end = page
+            .checked_add(mm::PAGE_SIZE)
+            .ok_or(ElfError::BadProgramHeaders)?;
         let frame = crate::frames::alloc().ok_or(ElfError::OutOfMemory)?;
         // Copy the file bytes that fall within this page (the rest of the
         // frame is already zero — fresh frames are zeroed — giving free .bss).
         let copy_start = page.max(vaddr);
-        let copy_end = (page + mm::PAGE_SIZE).min(file_end);
+        let copy_end = page_end.min(file_end);
         if copy_start < copy_end {
             let src_off = offset + (copy_start - vaddr);
             let src = image
@@ -173,7 +179,7 @@ fn map_segment(
             crate::frames::free(frame);
             ElfError::MapFailed
         })?;
-        page += mm::PAGE_SIZE;
+        page = page_end;
     }
     Ok(())
 }

@@ -508,7 +508,34 @@ fn emit_fault(frame: &TrapFrame, id: u64, scause: u64, stval: u64, pid: Option<u
     let _ = f.write_str(r#","ring":"#);
     let _ = write_ring(&mut f);
     let _ = f.write_str("}");
-    f.emit();
+    if f.overflowed() {
+        // A fault report that vanishes is the one failure P6 forbids. If the
+        // enriched frame (regs + pagewalk + ring) ever exceeds the buffer,
+        // emit a minimal frame under the SAME id instead of nothing — the
+        // operator still gets origin + cause + PC + faulting address, tagged
+        // `overflow` so a reader knows the rich fields were dropped.
+        let mut g = FrameBuf::new();
+        match pid {
+            Some(pid) => {
+                let _ = write!(
+                    g,
+                    r#"{{"id":{id},"type":"fault","origin":"payload","pid":{pid},"#
+                );
+            }
+            None => {
+                let _ = write!(g, r#"{{"id":{id},"type":"fault","origin":"kernel","#);
+            }
+        }
+        let _ = write!(
+            g,
+            r#""overflow":true,"cause_name":"{}","sepc":"0x{:x}","stval":"0x{stval:x}"}}"#,
+            cause_name(scause),
+            frame.sepc,
+        );
+        g.emit();
+    } else {
+        f.emit();
+    }
 }
 
 /// The 31 GPRs, ABI-named, as a JSON object — P6's full faulting register file.

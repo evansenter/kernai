@@ -13,7 +13,7 @@ host (Python, stdlib only)                guest (qemu -machine virt, -icount)
 │ qemu.py     THE qemu cmdline  │◄────────│   │        set_timer SRST         │
 │ runner.py   acceptance gates  │ cmds    │ kernel (S-mode, 0x80200000)       │
 │ demo.py     narrated tour     │────────►│ ┌ hal/ (unsafe island, 55/200) ─┐ │
-└──────────────────────────────┘ rxpmi   │ │ boot.rs entry, bss, phys i/o  │ │
+└──────────────────────────────┘ cmds     │ │ boot.rs entry, bss, phys i/o  │ │
                                           │ │ sbi.rs  ecall wrappers        │ │
  frames: AA 99 | u32 LE len | JSON        │ │ csr.rs  CSRs, satp, sscratch  │ │
  events: {"id":N,...} id == stream order  │ │ trap.rs vector, enter_user    │ │

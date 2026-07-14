@@ -423,16 +423,19 @@ agent ever sees is exactly reproducible.
         show(json.loads(fa))
     say(f"Two fresh boots produced identical streams ({len(a)} frames compared).")
     note("""
-That's M0-M10: a kernel that boots, narrates itself in structured events, runs
-sandboxed user programs in private address spaces (paging + W^X), enforces
-capabilities and multi-hop delegation (grants only ever shrink down a chain),
-kills runaways on an instruction budget,
-checkpoints and forks a running program, replays a recorded session
-byte-for-byte, is driven as a self-describing MCP server, and reports faults as
-rich causal diagnostic frames with a classic printf twin for measuring the
-difference. Next up (M10-M12): hardening delegation, a token-budgeted autonomy
-dial, and the E1-E8 evaluation suite that scores kernel surfaces against a
-fixed agent. See docs/WALKTHROUGH.md for the full guided tour and
+That's the whole M0-M12 ladder: a kernel that boots, narrates itself in
+structured events, runs sandboxed user programs in private address spaces
+(paging + W^X), enforces capabilities and multi-hop delegation (grants only
+ever shrink down a chain), kills runaways on an instruction budget, checkpoints
+and forks a running program, replays a recorded session byte-for-byte, is
+driven as a self-describing MCP server, reports faults as rich causal
+diagnostic frames with a classic printf twin, budgets the operator's attention
+with a coalescing digest + an autonomy dial, and scores the two diagnostic
+surfaces against a seeded-fault set (the E1 evaluation — run `make eval`). The
+twelve principles P1-P12 each have a tested mechanism. Beyond the ladder: a full
+agent-in-the-loop E1, a degraded reference implementation of the published
+surface spec (docs/SPEC.md), and the rest of the E-series as a public benchmark.
+See docs/WALKTHROUGH.md for the guided tour and
 docs/RFC-001-agent-native-kernel.md for where this is going.
 """)
 

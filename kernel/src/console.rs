@@ -18,10 +18,13 @@ pub struct FrameBuf {
 }
 
 impl FrameBuf {
-    /// 2 KiB: sized so the worst-case fault frame (full ring history plus
-    /// max-width u64 fields ≈ 1.1 KiB) can never poison itself into silence
-    /// — a fault report that vanishes is the one failure P6 forbids. Events
-    /// are still designed small (P3); this is headroom, not a target.
+    /// 2 KiB: the M9-enriched fault frame (full 31-register file + a 3-level
+    /// page-table walk + 8-entry ring history) reaches ~1.9 KiB in the reachable
+    /// worst case (a page fault), so it fits with a modest margin. A fault
+    /// report that vanishes is the one failure P6 forbids, so `emit_fault`
+    /// additionally falls back to a minimal frame on `overflowed()` — the buffer
+    /// size is the common path, the fallback is the backstop. Other events are
+    /// designed small (P3); this is headroom, not a target.
     pub const CAPACITY: usize = 2048;
 
     pub const fn new() -> Self {

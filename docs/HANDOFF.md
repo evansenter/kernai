@@ -86,8 +86,9 @@ the local working tree is not durable.
 
 ## What the operator can do
 
-Single command bytes: `r` ring · `x` crash · `p`/`m`/`i`/`f`/`d` the
-M3–M6/M10 suites. Or drive it structured: a `0xAA`-led length-prefixed frame
+Single command bytes: `r` ring · `x` crash · `p`/`m`/`i`/`f`/`d`/`e` the
+M3–M6/M10 suites + the M12 eval stimulus. Or drive it structured: a `0xAA`-led
+length-prefixed frame
 carrying JSON-RPC (MCP) — `initialize`, `tools/list`, `tools/call {run_suite|
 crash|ring_read|set_surface|set_autonomy}`, `resources/list`, `resources/read
 {trap_ring|processes|spec|surface|autonomy|digest}`. `run_suite` takes

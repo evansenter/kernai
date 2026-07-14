@@ -4,8 +4,9 @@
 //! faults (crasher = illegal instruction, wild = load, wxviol = store). Jumps
 //! to address 0 — unmapped in the payload's address space — so the CPU faults
 //! on the *instruction fetch* (scause 12, instruction_page_fault), sepc = 0.
-//! The agentic frame's pagewalk shows the level-2 entry is not present (v=0):
-//! "no mapping", a different root cause than wild's "mapped but supervisor".
+//! The agentic frame's pagewalk shows the leaf (level-0) entry is not present
+//! (v=0): "no mapping", a different root cause than wild's "mapped but
+//! supervisor" (a present page with u=0).
 
 // SAFETY: called once by sys's `_start`; unmangled so the asm can name it.
 #[unsafe(no_mangle)]

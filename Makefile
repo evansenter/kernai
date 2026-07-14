@@ -27,7 +27,7 @@ debug: build
 gdb:
 	gdb-multiarch $(KERNEL_ELF) -ex "target remote localhost:1234"
 
-# Narrated tour of M0-M2 for humans (docs/WALKTHROUGH.md is the readable twin).
+# Narrated tour (M0-M12) for humans (docs/WALKTHROUGH.md is the readable twin).
 demo: build
 	python3 -m harness.demo
 

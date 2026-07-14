@@ -321,7 +321,7 @@ fn respond_tools_list(id: &str) {
         tool(
             f,
             "run_suite",
-            "Run a payload acceptance suite (p|m|i|f).",
+            "Run a payload suite (p|m|i|f|d|e).",
             Some("suite"),
         )?;
         f.write_str(",")?;

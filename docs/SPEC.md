@@ -46,12 +46,15 @@ consumes one) but never repeat or decrease.
 | `payload_start` | `pid`, `name`, `entry`, `caps[]`, `caused_by`, `restored` | a workload began; `caused_by` = the parent's start event or null (P12) |
 | `payload_output` | `pid`, `untrusted:true`, `caused_by`, `len`, `data` | workload stdout — always tagged untrusted, bytes confined to a JSON string (P7) |
 | `payload_exit` | `pid`, `code`, `caused_by` | clean exit |
-| `payload_spawn` | `parent`, `child`, `parent_caps[]`, `requested[]`, `granted[]`, `attenuated` | delegation; `granted ⊆ requested & parent_caps & ceiling` (P10) |
-| `syscall_denied` | `pid`, `syscall`, `cap` | a capability-gated call was refused (P1: a refusal is an event) |
+| `payload_spawn` | `parent`, `child`, `name`, `parent_caps[]`, `requested[]`, `granted[]`, `attenuated` | delegation; `granted ⊆ requested & parent_caps & ceiling` (P10) |
+| `syscall_denied` | `pid`, `syscall`, `cap`, `reason` | a capability-gated call was refused (P1: a refusal is an event) |
 | `payload_killed` | `pid`, `reason`, `elapsed`, `deadline`, `caused_by` | instruction-budget preemption (P2) |
 | `snapshot` | `pid`, `snapshot` | a checkpoint was taken (P8) |
+| `payload_load_fault` | `pid`, `name`, `reason` | a payload's ELF failed to load / map (e.g. out of memory) |
+| `payload_yield` | `pid` | a `Cap::Yield`-holding payload yielded |
 | `fault` | see §2.1 | the P6 diagnostic frame |
 | `suite_done` | `exited`, `faulted`, `killed` | a suite drained |
+| `panic` | `location`, `msg` | a kernel panic (a bug); reported structured, then shutdown |
 | `rpc` | `rpc:{…}` | a control-plane response envelope (§3) |
 
 ### 2.1 The fault frame (P6)
@@ -62,7 +65,12 @@ localize the bug, no debugger.** Fields:
 - `origin`: `"payload"` (kernel survives) or `"kernel"` (shutdown follows).
 - `pid`, `caused_by`: the workload and the `payload_start` it descends from (P12).
 - `cause` (raw scause hex), `cause_name` (decoded), `sepc`, `stval`.
+- `ra`, `sp`: the return address and stack pointer, top-level for convenience
+  (also present inside `regs`).
 - `regs`: all 31 GPRs, ABI-named (`ra`,`sp`,…,`t6`).
+- `overflow` (only if the enriched frame didn't fit the 2 KiB frame — then the
+  rich fields are dropped and only `origin`/`cause_name`/`sepc`/`stval` remain,
+  so a fault report is never silent).
 - `insn`: decoded offending instruction (opcode/funct/rd/rs/`csr`) for illegal
   instructions, else null.
 - `pagewalk`: per-level Sv39 PTEs with decoded `v/r/w/x/u` flags for page
@@ -145,7 +153,7 @@ agent-in-the-loop E1 (localization rate/tokens with a real model) is future work
 ## 6. Command bytes (§4 fallback, compat)
 
 A single non-`0xAA` byte is an operator command, the zero-dependency escape
-hatch the structured plane grew out of: `r` ring · `x` crash · `p`/`m`/`i`/`f`/`d`
+hatch the structured plane grew out of: `r` ring · `x` crash · `p`/`m`/`i`/`f`/`d`/`e`
 the suites. A leading `0xAA` instead begins a request frame (§3).
 
 ## Versioning

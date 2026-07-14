@@ -63,8 +63,8 @@ make gdb     # attach gdb-multiarch to a running `make debug`
 Once booted (`make run`), the kernel serves single-byte operator commands on
 the serial line: `r` dumps the trap ring, `x` crashes the kernel on purpose,
 `p` runs the M3 payload suite, `m` the M4 sandbox suite, `i` the M5 isolation
-suite, `f` the M6 checkpoint/fork suite, `d` the M10 delegation-chain suite. A
-leading `0xAA` byte instead begins
+suite, `f` the M6 checkpoint/fork suite, `d` the M10 delegation-chain suite, `e`
+the M12 eval stimulus suite. A leading `0xAA` byte instead begins
 an MCP/JSON-RPC request frame (M8): the structured control plane those bytes
 are a stand-in for — `initialize`, `tools/list`, `tools/call`,
 `resources/read` (`trap_ring`, `processes`, and the self-describing `spec`).
