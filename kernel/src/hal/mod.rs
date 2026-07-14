@@ -12,11 +12,12 @@ mod sbi;
 mod trap;
 
 pub use boot::{
-    ARENA_BASE, ARENA_SIZE, arena_read, arena_write, arena_zero, boot_stack_top, kernel_end,
+    POOL_BASE, POOL_END, boot_stack_top, kernel_end, phys_read, phys_read_u64, phys_write,
+    phys_write_u64, phys_zero,
 };
 pub use csr::{
     enable_timer_interrupts, read_scause, read_stval, read_time, wait_for_interrupt,
-    without_interrupts,
+    without_interrupts, write_satp,
 };
 pub use sbi::{console_getchar, console_putchar, set_timer, shutdown};
 pub use trap::{enter_user, init as traps_init, trigger_illegal_instruction};

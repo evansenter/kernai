@@ -9,7 +9,9 @@ fn main() {
     println!("cargo:rerun-if-changed=link.ld");
 
     let payload_dir = format!("{dir}/../payloads/target/riscv64gc-unknown-none-elf/release");
-    for name in ["hello", "crasher", "muzzled", "spawner", "child", "runaway"] {
+    for name in [
+        "hello", "crasher", "muzzled", "spawner", "child", "runaway", "wild", "wxviol",
+    ] {
         let path = format!("{payload_dir}/{name}");
         if !Path::new(&path).exists() {
             panic!(

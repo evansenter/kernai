@@ -142,29 +142,34 @@ extern "C" fn __kernai_trap(frame: &mut TrapFrame) {
     }
 }
 
-/// First entry into a freshly loaded payload: drop to U-mode at `entry`.
-/// The payload's own `_start` sets its stack; registers are not scrubbed
-/// (no kernel secrets exist yet — revisit with M5 isolation).
-pub fn enter_user(entry: usize) -> ! {
+/// First entry into a freshly loaded payload: switch to its address space
+/// (`satp`) and drop to U-mode at `entry`. The payload's own `_start` sets
+/// its stack; registers are not scrubbed (a follow-up hardening item —
+/// pre-M5 there were no secrets, now the register file could leak a kernel
+/// value into a fresh payload; low risk, tracked in HANDOFF).
+pub fn enter_user(satp: u64, entry: usize) -> ! {
     let trap_stack = boot::trap_stack_top();
-    // SAFETY: arming sscratch and the sret must be atomic w.r.t. interrupts.
-    // enter_user runs in S-mode with interrupts enabled (the scheduler is
-    // reached with SPIE=1). If a timer fired between the sscratch write and
-    // the sret, that trap — seeing sscratch != 0 — would be misclassified as
-    // from-U and __kernai_trap would reset sscratch to 0, so the payload
-    // would enter with a desynced sscratch and its next trap would build the
-    // kernel frame on the payload's own stack (a privilege-boundary break).
-    // So: clear sstatus.SIE first (bit 1); sret restores SIE from SPIE=1,
-    // re-enabling interrupts atomically on entry to U-mode. SPP=0 selects
-    // U-mode. `entry` was validated by the loader to lie in the arena.
+    // SAFETY: the satp switch, sscratch arm, and sret must be atomic w.r.t.
+    // interrupts. enter_user runs in S-mode with interrupts enabled (the
+    // scheduler is reached with SPIE=1). A timer in the window between arming
+    // sscratch and the sret — seeing sscratch != 0 — would be misclassified
+    // as from-U, and __kernai_trap would reset sscratch to 0, so the payload
+    // would enter with a desynced sscratch and corrupt its next trap. So we
+    // clear sstatus.SIE first; sret restores SIE from SPIE=1, re-enabling
+    // interrupts atomically on entry to U-mode. The satp switch is safe mid-
+    // function because every payload table carries the kernel identity
+    // gigapage, so this code stays mapped. SPP=0 selects U-mode.
     unsafe {
         core::arch::asm!(
             "csrci sstatus, 2",         // clear sstatus.SIE: no trap in the window below
+            "csrw satp, {satp}",        // switch to the payload's address space
+            "sfence.vma",               // flush stale TLB entries
             "csrw sscratch, {tstack}",  // arm the U-mode trap stack
             "csrw sepc, {entry}",
             "csrc sstatus, {spp}",      // SPP = 0 (return to U-mode)
             "csrs sstatus, {spie}",     // SPIE = 1 (interrupts on after sret)
             "sret",
+            satp = in(reg) satp,
             tstack = in(reg) trap_stack,
             entry = in(reg) entry,
             spp = in(reg) SSTATUS_SPP,

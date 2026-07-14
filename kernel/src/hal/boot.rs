@@ -58,26 +58,29 @@ pub fn trap_stack_top() -> usize {
     (&raw const __trap_stack_top) as usize
 }
 
-/// Payload arena: fixed physical range where payload ELFs are loaded and
-/// run (no paging until M5, so this address is baked into payloads/link.ld).
-pub const ARENA_BASE: usize = 0x8040_0000;
-pub const ARENA_SIZE: usize = 2 * 1024 * 1024;
+/// Physical frame pool: the RAM the kernel hands out as 4 KiB frames (for
+/// page tables and per-payload memory, M5). Starts 2 MiB above the kernel
+/// load base — well clear of the ~150 KiB kernel image — and runs to the end
+/// of qemu-virt's 128 MiB DRAM. The kernel identity-maps this range as a
+/// supervisor gigapage, so a physical address in the pool is also its kernel
+/// virtual address; `phys_*` access it directly.
+pub const POOL_BASE: usize = 0x8040_0000;
+pub const POOL_END: usize = 0x8800_0000; // 0x8000_0000 + 128 MiB
 
-fn arena_slice(offset: usize, len: usize) -> Option<*mut u8> {
-    let end = offset.checked_add(len)?;
-    if end > ARENA_SIZE {
+fn pool_ptr(pa: usize, len: usize) -> Option<*mut u8> {
+    let end = pa.checked_add(len)?;
+    if pa < POOL_BASE || end > POOL_END {
         return None;
     }
-    Some((ARENA_BASE + offset) as *mut u8)
+    Some(pa as *mut u8)
 }
 
-/// Copy `bytes` into the arena at `offset`. False if out of bounds.
-/// Bounds-checked raw memory access so the ELF loader stays safe code.
-pub fn arena_write(offset: usize, bytes: &[u8]) -> bool {
-    match arena_slice(offset, bytes.len()) {
-        // SAFETY: dst lies wholly inside the arena, which link.ld/boot keep
-        // disjoint from every kernel section (asserted at boot via
-        // kernel_end()); `bytes` is a kernel slice, so src/dst can't overlap.
+/// Copy `bytes` to physical address `pa` (must lie in the pool). False if not.
+/// Bounds-checked raw access so the frame allocator / loader stay safe code.
+pub fn phys_write(pa: usize, bytes: &[u8]) -> bool {
+    match pool_ptr(pa, bytes.len()) {
+        // SAFETY: dst lies wholly in the pool (disjoint from the kernel image,
+        // asserted at boot); `bytes` is a kernel slice so src/dst can't overlap.
         Some(dst) => unsafe {
             core::ptr::copy_nonoverlapping(bytes.as_ptr(), dst, bytes.len());
             true
@@ -86,10 +89,10 @@ pub fn arena_write(offset: usize, bytes: &[u8]) -> bool {
     }
 }
 
-/// Zero `len` bytes of the arena at `offset`. False if out of bounds.
-pub fn arena_zero(offset: usize, len: usize) -> bool {
-    match arena_slice(offset, len) {
-        // SAFETY: range is wholly inside the arena (see arena_write).
+/// Zero `len` bytes at physical `pa`. False if out of the pool.
+pub fn phys_zero(pa: usize, len: usize) -> bool {
+    match pool_ptr(pa, len) {
+        // SAFETY: range is wholly in the pool (see phys_write).
         Some(dst) => unsafe {
             core::ptr::write_bytes(dst, 0, len);
             true
@@ -98,13 +101,38 @@ pub fn arena_zero(offset: usize, len: usize) -> bool {
     }
 }
 
-/// Copy arena bytes at `offset` into `buf` (payload memory → kernel buffer,
-/// e.g. for the write syscall). False if out of bounds.
-pub fn arena_read(offset: usize, buf: &mut [u8]) -> bool {
-    match arena_slice(offset, buf.len()) {
-        // SAFETY: src is wholly inside the arena; dst is a kernel slice.
+/// Copy `buf.len()` bytes from physical `pa` into `buf`. False if out of pool.
+pub fn phys_read(pa: usize, buf: &mut [u8]) -> bool {
+    match pool_ptr(pa, buf.len()) {
+        // SAFETY: src is wholly in the pool; dst is a kernel slice.
         Some(src) => unsafe {
             core::ptr::copy_nonoverlapping(src, buf.as_mut_ptr(), buf.len());
+            true
+        },
+        None => false,
+    }
+}
+
+/// Read a naturally-aligned u64 (a page-table entry) at physical `pa`.
+pub fn phys_read_u64(pa: usize) -> Option<u64> {
+    if !pa.is_multiple_of(8) {
+        return None;
+    }
+    let ptr = pool_ptr(pa, 8)?;
+    // SAFETY: ptr is in the pool and 8-aligned; PTEs are the only 8-byte
+    // physical reads and always land on aligned slots.
+    Some(unsafe { core::ptr::read_volatile(ptr as *const u64) })
+}
+
+/// Write a naturally-aligned u64 (a page-table entry) at physical `pa`.
+pub fn phys_write_u64(pa: usize, val: u64) -> bool {
+    if !pa.is_multiple_of(8) {
+        return false;
+    }
+    match pool_ptr(pa, 8) {
+        // SAFETY: ptr is in the pool and 8-aligned (see phys_read_u64).
+        Some(ptr) => unsafe {
+            core::ptr::write_volatile(ptr as *mut u64, val);
             true
         },
         None => false,

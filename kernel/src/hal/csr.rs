@@ -37,6 +37,21 @@ pub(super) fn write_stvec(addr: usize) {
     unsafe { asm!("csrw stvec, {}", in(reg) addr, options(nomem, nostack)) };
 }
 
+/// Write satp (address-translation control) and flush the whole TLB.
+/// `value` encodes MODE (bits 63:60), ASID, and the root table PPN. Crate
+/// callers pass a table the mm module built; a bad table can only fault the
+/// kernel's own accesses, not violate Rust's memory model from safe code.
+pub fn write_satp(value: u64) {
+    // SAFETY: csrw satp switches the active page table; the following
+    // sfence.vma flushes stale TLB entries so the new mapping takes effect.
+    // No memory operands. Must be a compiler barrier (no nomem) so accesses
+    // aren't reordered across the address-space switch.
+    unsafe {
+        asm!("csrw satp, {}", in(reg) value, options(nostack));
+        asm!("sfence.vma", options(nostack));
+    }
+}
+
 /// Set sscratch: the trap vector's "where is the kernel stack" register.
 /// Convention: while in U-mode it holds the kernel trap-stack top; while in
 /// S-mode it holds 0. Crate-internal — only hal::trap manages it.

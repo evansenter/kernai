@@ -1,11 +1,15 @@
 #![forbid(unsafe_code)]
-//! Minimal ELF64 loader for rv64 payloads. Parses a byte slice and copies
-//! PT_LOAD segments into the payload arena via the bounds-checked
-//! `hal::arena_*` helpers — so loading untrusted-ish payload images stays
-//! entirely in safe code. No dynamic linking, no relocations (payloads are
-//! statically linked at ARENA_BASE); those are hard non-goals.
+//! Minimal ELF64 loader for rv64 payloads. Parses a byte slice and maps each
+//! PT_LOAD segment into a fresh per-payload address space (M5): a frame per
+//! page, file bytes copied in, the rest left zero (`.bss`), mapped at the
+//! segment's virtual address with permissions taken from the program header —
+//! so a writable segment is never executable (W^X). Untrusted image bytes are
+//! handled entirely in safe code (checked arithmetic, `hal::phys_*`).
+//!
+//! No dynamic linking, no relocations (payloads are statically linked at a
+//! fixed low VA); those are hard non-goals.
 
-use crate::hal;
+use crate::mm::{self, AddressSpace};
 
 /// Why an image could not be loaded. These become fields in the load-fault
 /// diagnostic frame (P6) rather than panics.
@@ -15,8 +19,10 @@ pub enum ElfError {
     BadMagic,
     NotElf64Rv,
     BadProgramHeaders,
-    SegmentOutOfArena,
-    EntryOutOfArena,
+    WxViolation,
+    OutOfMemory,
+    MapFailed,
+    EntryUnmapped,
 }
 
 impl ElfError {
@@ -26,18 +32,22 @@ impl ElfError {
             ElfError::BadMagic => "bad_magic",
             ElfError::NotElf64Rv => "not_elf64_riscv",
             ElfError::BadProgramHeaders => "bad_program_headers",
-            ElfError::SegmentOutOfArena => "segment_out_of_arena",
-            ElfError::EntryOutOfArena => "entry_out_of_arena",
+            ElfError::WxViolation => "wx_violation",
+            ElfError::OutOfMemory => "out_of_memory",
+            ElfError::MapFailed => "map_failed",
+            ElfError::EntryUnmapped => "entry_unmapped",
         }
     }
 }
 
 const PT_LOAD: u32 = 1;
+const PF_X: u32 = 1;
+const PF_W: u32 = 2;
+const PF_R: u32 = 4;
 
-// All offset arithmetic below is checked: the header fields are treated as
-// adversarial (that is the design intent — M9 feeds this loader hostile
-// images), so a malformed image must become a structured Err, never a panic,
-// in every build profile (debug overflow-checks included).
+// Checked reads: header fields are treated as adversarial (M9 feeds this
+// loader hostile images), so a malformed image is a structured Err, never a
+// panic, in every build profile.
 fn u16_at(b: &[u8], off: usize) -> Option<u16> {
     Some(u16::from_le_bytes(
         b.get(off..off.checked_add(2)?)?.try_into().ok()?,
@@ -54,19 +64,9 @@ fn u64_at(b: &[u8], off: usize) -> Option<u64> {
     ))
 }
 
-fn arena_offset(vaddr: u64) -> Option<usize> {
-    let base = hal::ARENA_BASE as u64;
-    if vaddr < base {
-        return None;
-    }
-    usize::try_from(vaddr - base).ok()
-}
-
-/// Load `image` into the arena and return its entry point (a virtual/physical
-/// address inside the arena; identity-mapped pre-M5). Idempotent per call —
-/// the caller owns the arena for exactly one payload at a time.
-pub fn load(image: &[u8]) -> Result<usize, ElfError> {
-    // ELF identification.
+/// Load `image` into `space` and return its entry virtual address. On error
+/// the caller destroys `space` (freeing any frames already mapped).
+pub fn load(image: &[u8], space: &AddressSpace) -> Result<usize, ElfError> {
     if image.len() < 64 {
         return Err(ElfError::TooShort);
     }
@@ -74,25 +74,18 @@ pub fn load(image: &[u8]) -> Result<usize, ElfError> {
         return Err(ElfError::BadMagic);
     }
     // EI_CLASS=2 (64-bit), EI_DATA=1 (little-endian), e_machine=243 (RISC-V).
-    if image[4] != 2 || image[5] != 1 {
-        return Err(ElfError::NotElf64Rv);
-    }
-    if u16_at(image, 18) != Some(243) {
+    if image[4] != 2 || image[5] != 1 || u16_at(image, 18) != Some(243) {
         return Err(ElfError::NotElf64Rv);
     }
 
-    let entry = u64_at(image, 24).ok_or(ElfError::TooShort)?;
-    let phoff = u64_at(image, 32).ok_or(ElfError::TooShort)?;
+    let entry = u64_at(image, 24).ok_or(ElfError::TooShort)? as usize;
+    let phoff = usize::try_from(u64_at(image, 32).ok_or(ElfError::TooShort)?)
+        .map_err(|_| ElfError::BadProgramHeaders)?;
     let phentsize = u16_at(image, 54).ok_or(ElfError::TooShort)? as usize;
     let phnum = u16_at(image, 56).ok_or(ElfError::TooShort)? as usize;
-
     if phentsize < 56 {
         return Err(ElfError::BadProgramHeaders);
     }
-
-    let phoff = usize::try_from(phoff).map_err(|_| ElfError::BadProgramHeaders)?;
-    // The whole program-header table must fit in the image (also bounds every
-    // `ph + delta` field read below, and rejects an overflowing table span).
     let table_span = phnum
         .checked_mul(phentsize)
         .and_then(|s| phoff.checked_add(s))
@@ -102,47 +95,85 @@ pub fn load(image: &[u8]) -> Result<usize, ElfError> {
     }
 
     for i in 0..phnum {
-        let ph = phoff + i * phentsize; // < table_span ≤ image.len(); no overflow
-        let p_type = u32_at(image, ph).ok_or(ElfError::BadProgramHeaders)?;
-        if p_type != PT_LOAD {
+        let ph = phoff + i * phentsize; // < table_span ≤ len
+        if u32_at(image, ph).ok_or(ElfError::BadProgramHeaders)? != PT_LOAD {
             continue;
         }
-        let p_offset = u64_at(image, ph + 8).ok_or(ElfError::BadProgramHeaders)?;
-        let p_vaddr = u64_at(image, ph + 16).ok_or(ElfError::BadProgramHeaders)?;
-        let p_filesz = u64_at(image, ph + 32).ok_or(ElfError::BadProgramHeaders)?;
-        let p_memsz = u64_at(image, ph + 40).ok_or(ElfError::BadProgramHeaders)?;
-
-        let dst_off = arena_offset(p_vaddr).ok_or(ElfError::SegmentOutOfArena)?;
-        let filesz = usize::try_from(p_filesz).map_err(|_| ElfError::BadProgramHeaders)?;
-        let memsz = usize::try_from(p_memsz).map_err(|_| ElfError::BadProgramHeaders)?;
-        if memsz < filesz {
+        let p_flags = u32_at(image, ph + 4).ok_or(ElfError::BadProgramHeaders)?;
+        let p_offset = usize::try_from(u64_at(image, ph + 8).ok_or(ElfError::BadProgramHeaders)?)
+            .map_err(|_| ElfError::BadProgramHeaders)?;
+        let p_vaddr = usize::try_from(u64_at(image, ph + 16).ok_or(ElfError::BadProgramHeaders)?)
+            .map_err(|_| ElfError::BadProgramHeaders)?;
+        let p_filesz = usize::try_from(u64_at(image, ph + 32).ok_or(ElfError::BadProgramHeaders)?)
+            .map_err(|_| ElfError::BadProgramHeaders)?;
+        let p_memsz = usize::try_from(u64_at(image, ph + 40).ok_or(ElfError::BadProgramHeaders)?)
+            .map_err(|_| ElfError::BadProgramHeaders)?;
+        if p_memsz < p_filesz {
             return Err(ElfError::BadProgramHeaders);
         }
 
-        let src_start = usize::try_from(p_offset).map_err(|_| ElfError::BadProgramHeaders)?;
-        let src_end = src_start
-            .checked_add(filesz)
-            .ok_or(ElfError::BadProgramHeaders)?;
-        let src = image
-            .get(src_start..src_end)
-            .ok_or(ElfError::BadProgramHeaders)?;
+        let mut perms = mm::U;
+        if p_flags & PF_R != 0 {
+            perms |= mm::R;
+        }
+        if p_flags & PF_W != 0 {
+            perms |= mm::W;
+        }
+        if p_flags & PF_X != 0 {
+            perms |= mm::X;
+        }
+        // W^X: a segment must never be both writable and executable.
+        if perms & mm::W != 0 && perms & mm::X != 0 {
+            return Err(ElfError::WxViolation);
+        }
 
-        // Copy file bytes, then zero the tail (.bss lives in memsz > filesz).
-        // arena_write/arena_zero bounds-check dst internally (checked_add).
-        if !hal::arena_write(dst_off, src) {
-            return Err(ElfError::SegmentOutOfArena);
-        }
-        let zero_off = dst_off
-            .checked_add(filesz)
-            .ok_or(ElfError::SegmentOutOfArena)?;
-        if !hal::arena_zero(zero_off, memsz - filesz) {
-            return Err(ElfError::SegmentOutOfArena);
-        }
+        map_segment(image, space, p_vaddr, p_offset, p_filesz, p_memsz, perms)?;
     }
 
-    let entry_usize = usize::try_from(entry).map_err(|_| ElfError::EntryOutOfArena)?;
-    if !(hal::ARENA_BASE..hal::ARENA_BASE + hal::ARENA_SIZE).contains(&entry_usize) {
-        return Err(ElfError::EntryOutOfArena);
+    if space.translate(entry).is_none() {
+        return Err(ElfError::EntryUnmapped);
     }
-    Ok(entry_usize)
+    Ok(entry)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn map_segment(
+    image: &[u8],
+    space: &AddressSpace,
+    vaddr: usize,
+    offset: usize,
+    filesz: usize,
+    memsz: usize,
+    perms: u64,
+) -> Result<(), ElfError> {
+    let seg_end = vaddr
+        .checked_add(memsz)
+        .ok_or(ElfError::BadProgramHeaders)?;
+    let file_end = vaddr
+        .checked_add(filesz)
+        .ok_or(ElfError::BadProgramHeaders)?;
+    let mut page = vaddr - (vaddr % mm::PAGE_SIZE);
+    while page < seg_end {
+        let frame = crate::frames::alloc().ok_or(ElfError::OutOfMemory)?;
+        // Copy the file bytes that fall within this page (the rest of the
+        // frame is already zero — fresh frames are zeroed — giving free .bss).
+        let copy_start = page.max(vaddr);
+        let copy_end = (page + mm::PAGE_SIZE).min(file_end);
+        if copy_start < copy_end {
+            let src_off = offset + (copy_start - vaddr);
+            let src = image
+                .get(src_off..src_off + (copy_end - copy_start))
+                .ok_or(ElfError::BadProgramHeaders)?;
+            if !crate::hal::phys_write(frame + (copy_start - page), src) {
+                crate::frames::free(frame);
+                return Err(ElfError::MapFailed);
+            }
+        }
+        space.map_page(page, frame, perms).map_err(|_| {
+            crate::frames::free(frame);
+            ElfError::MapFailed
+        })?;
+        page += mm::PAGE_SIZE;
+    }
+    Ok(())
 }

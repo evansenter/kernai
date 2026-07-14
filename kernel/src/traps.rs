@@ -316,8 +316,45 @@ fn emit_fault(frame: &TrapFrame, id: u64, scause: u64, stval: u64, pid: Option<u
     } else {
         let _ = f.write_str("null");
     }
+    // For a payload page fault, walk its page table for the faulting address:
+    // the operator sees exactly which level was invalid or lacked permission
+    // (the seed of M9's full P6 diagnostic frame).
+    let _ = f.write_str(r#","pagewalk":"#);
+    if pid.is_some() && matches!(scause, 12 | 13 | 15) {
+        write_pagewalk(&mut f, stval as usize);
+    } else {
+        let _ = f.write_str("null");
+    }
     let _ = f.write_str(r#","ring":"#);
     let _ = write_ring(&mut f);
     let _ = f.write_str("}");
     f.emit();
+}
+
+/// Append the current payload's page-table walk for `va` as a JSON array of
+/// per-level PTEs with decoded permission flags.
+fn write_pagewalk(f: &mut FrameBuf, va: usize) {
+    let walk = match crate::payload::current_pagewalk(va) {
+        Some(w) => w,
+        None => {
+            let _ = f.write_str("null");
+            return;
+        }
+    };
+    let _ = f.write_str("[");
+    for (i, (level, pte)) in walk.entries().enumerate() {
+        if i > 0 {
+            let _ = f.write_str(",");
+        }
+        let _ = write!(
+            f,
+            r#"{{"level":{level},"pte":"0x{pte:x}","v":{},"r":{},"w":{},"x":{},"u":{}}}"#,
+            pte & 1,
+            (pte >> 1) & 1,
+            (pte >> 2) & 1,
+            (pte >> 3) & 1,
+            (pte >> 4) & 1,
+        );
+    }
+    let _ = f.write_str("]");
 }

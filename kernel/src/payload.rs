@@ -14,9 +14,29 @@ use core::fmt::Write;
 use core::sync::atomic::{AtomicIsize, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use crate::console::FrameBuf;
+use crate::mm::{self, AddressSpace};
 use crate::{elf, events, hal};
 
 const RE: Ordering = Ordering::Relaxed;
+
+/// Root frame of the kernel-only address space (identity gigapage). The
+/// scheduler/idle run under this satp; each payload runs under its own.
+static KERNEL_ROOT: AtomicUsize = AtomicUsize::new(0);
+
+/// Build the kernel address space and turn on Sv39 paging. Called once from
+/// kmain before traps are armed. After this the kernel runs translated, but
+/// the identity gigapage makes every kernel VA equal its physical address, so
+/// it is transparent.
+pub fn init_paging() {
+    let space = AddressSpace::new().expect("kernel root frame");
+    mm::map_kernel(&space).expect("kernel gigapage");
+    KERNEL_ROOT.store(space.root(), RE);
+    hal::write_satp(space.satp());
+}
+
+fn kernel_satp() -> u64 {
+    AddressSpace::from_root(KERNEL_ROOT.load(RE)).satp()
+}
 
 /// Per-call byte quota for `write` (P3/P7 seed): a hostile payload cannot
 /// flood the operator's context window.
@@ -69,6 +89,8 @@ static MUZZLED: &[u8] = include_bytes!(env!("PAYLOAD_MUZZLED"));
 static SPAWNER: &[u8] = include_bytes!(env!("PAYLOAD_SPAWNER"));
 static CHILD: &[u8] = include_bytes!(env!("PAYLOAD_CHILD"));
 static RUNAWAY: &[u8] = include_bytes!(env!("PAYLOAD_RUNAWAY"));
+static WILD: &[u8] = include_bytes!(env!("PAYLOAD_WILD"));
+static WXVIOL: &[u8] = include_bytes!(env!("PAYLOAD_WXVIOL"));
 
 static IMAGES: &[Image] = &[
     Image {
@@ -112,6 +134,20 @@ static IMAGES: &[Image] = &[
         caps: CAP_WRITE,
         deadline: 15_000,
     },
+    // wild: reads kernel memory from U-mode → load page fault (isolation).
+    Image {
+        name: "wild",
+        elf: WILD,
+        caps: CAP_WRITE,
+        deadline: 0,
+    },
+    // wxviol: writes its own code → store page fault (W^X).
+    Image {
+        name: "wxviol",
+        elf: WXVIOL,
+        caps: CAP_WRITE,
+        deadline: 0,
+    },
 ];
 
 const IMG_HELLO: usize = 0;
@@ -120,6 +156,8 @@ const IMG_MUZZLED: usize = 2;
 const IMG_SPAWNER: usize = 3;
 const IMG_CHILD: usize = 4;
 const IMG_RUNAWAY: usize = 5;
+const IMG_WILD: usize = 6;
+const IMG_WXVIOL: usize = 7;
 
 /// Map a payload-supplied spawn selector (stable ABI, see payloads/sys) to an
 /// image index. Only images a payload is allowed to spawn appear here.
@@ -153,6 +191,8 @@ struct Slot {
     started_at: AtomicU64,
     /// Instruction-count deadline in timebase units (0 = none).
     deadline: AtomicU64,
+    /// Root frame of this payload's address space (0 = none / reaped).
+    root: AtomicUsize,
 }
 
 impl Slot {
@@ -165,6 +205,7 @@ impl Slot {
             exit_code: AtomicIsize::new(0),
             started_at: AtomicU64::new(0),
             deadline: AtomicU64::new(0),
+            root: AtomicUsize::new(0),
         }
     }
 }
@@ -173,13 +214,12 @@ static TABLE: [Slot; MAX_PROC] = [const { Slot::new() }; MAX_PROC];
 /// pid of the payload currently on the CPU, or NO_PID in kernel/idle.
 static CURRENT: AtomicUsize = AtomicUsize::new(NO_PID);
 
-/// The kernel image must not overlap the payload arena (no paging yet).
-/// Panics loudly at boot if the linker ever lets them collide.
-pub fn assert_arena_clear() {
-    let kend = hal::kernel_end();
+/// The kernel image must not overlap the physical frame pool. Panics loudly
+/// at boot if the linker ever lets them collide.
+pub fn assert_pool_clear() {
     assert!(
-        kend <= hal::ARENA_BASE,
-        "kernel image overlaps payload arena"
+        hal::kernel_end() <= hal::POOL_BASE,
+        "kernel image overlaps the frame pool"
     );
 }
 
@@ -206,6 +246,17 @@ pub fn seed_suite_m4() {
     enqueue(IMG_RUNAWAY, IMAGES[IMG_RUNAWAY].caps, NO_PID);
 }
 
+/// M5 suite (operator-triggered by 'i'): memory isolation. A payload that
+/// reaches into kernel memory faults; a payload that writes its own code
+/// faults (W^X); a clean payload runs afterward, proving the kernel survived
+/// both with its own address space intact.
+pub fn seed_suite_m5() {
+    clear_table();
+    enqueue(IMG_WILD, IMAGES[IMG_WILD].caps, NO_PID);
+    enqueue(IMG_WXVIOL, IMAGES[IMG_WXVIOL].caps, NO_PID);
+    enqueue(IMG_HELLO, IMAGES[IMG_HELLO].caps, NO_PID);
+}
+
 fn enqueue(image: usize, caps: u32, parent: usize) -> Option<usize> {
     for (pid, slot) in TABLE.iter().enumerate() {
         if slot.state.load(RE) == EMPTY {
@@ -215,6 +266,7 @@ fn enqueue(image: usize, caps: u32, parent: usize) -> Option<usize> {
             slot.exit_code.store(0, RE);
             slot.deadline.store(IMAGES[image].deadline, RE);
             slot.started_at.store(0, RE);
+            slot.root.store(0, RE);
             slot.state.store(PENDING, RE);
             return Some(pid);
         }
@@ -237,8 +289,15 @@ pub extern "C" fn scheduler_resume() -> ! {
 
 /// Pick and start the next pending payload; when the queue drains, announce
 /// it and drop to the idle command loop. Diverges either way.
+///
+/// Entered fresh each time (from kmain or via scheduler_resume after a
+/// payload leaves). First switches to the kernel address space — so the
+/// just-departed payload's page table is no longer active and can be safely
+/// freed — then reaps every terminated payload's frames.
 pub fn run() -> ! {
     CURRENT.store(NO_PID, RE);
+    hal::write_satp(kernel_satp());
+    reap_terminated();
     match take_next_pending() {
         Some(pid) => start(pid),
         None => {
@@ -248,23 +307,52 @@ pub fn run() -> ! {
     }
 }
 
+/// Free the address space of every payload that has reached a terminal state,
+/// returning its frames to the pool. Safe to call only under the kernel satp
+/// (never while a payload table is active).
+fn reap_terminated() {
+    for slot in TABLE.iter() {
+        let root = slot.root.load(RE);
+        if root != 0 && matches!(slot.state.load(RE), EXITED | FAULTED | KILLED) {
+            AddressSpace::from_root(root).destroy();
+            slot.root.store(0, RE);
+        }
+    }
+}
+
 fn start(pid: usize) -> ! {
     let image = TABLE[pid].image.load(RE);
     let img = &IMAGES[image];
-    match elf::load(img.elf) {
-        Ok(entry) => {
-            TABLE[pid].state.store(RUNNING, RE);
-            TABLE[pid].started_at.store(hal::read_time(), RE);
-            CURRENT.store(pid, RE);
-            emit_start(pid, img.name, TABLE[pid].caps.load(RE), entry);
-            hal::enter_user(entry)
-        }
-        Err(e) => {
-            TABLE[pid].state.store(FAULTED, RE);
-            emit_load_fault(pid, img.name, e.as_str());
-            run()
-        }
+
+    // Build a fresh address space: kernel identity map + the payload's ELF.
+    let space = match AddressSpace::new() {
+        Some(s) => s,
+        None => load_failed(pid, img.name, "out_of_memory"),
+    };
+    if mm::map_kernel(&space).is_err() {
+        space.destroy();
+        load_failed(pid, img.name, "kernel_map_failed");
     }
+    let entry = match elf::load(img.elf, &space) {
+        Ok(entry) => entry,
+        Err(e) => {
+            space.destroy();
+            load_failed(pid, img.name, e.as_str());
+        }
+    };
+
+    TABLE[pid].root.store(space.root(), RE);
+    TABLE[pid].state.store(RUNNING, RE);
+    TABLE[pid].started_at.store(hal::read_time(), RE);
+    CURRENT.store(pid, RE);
+    emit_start(pid, img.name, TABLE[pid].caps.load(RE), entry);
+    hal::enter_user(space.satp(), entry)
+}
+
+fn load_failed(pid: usize, name: &str, reason: &str) -> ! {
+    TABLE[pid].state.store(FAULTED, RE);
+    emit_load_fault(pid, name, reason);
+    run()
 }
 
 // ---- Syscall hooks (called from crate::syscall) -------------------------
@@ -281,6 +369,19 @@ pub fn current_has(cap: Cap) -> bool {
         NO_PID => false,
         pid => TABLE[pid].caps.load(RE) & cap.bit() != 0,
     }
+}
+
+/// The current payload's address space, if one is running.
+fn current_space() -> Option<AddressSpace> {
+    let pid = current_pid()?;
+    let root = TABLE[pid].root.load(RE);
+    (root != 0).then(|| AddressSpace::from_root(root))
+}
+
+/// Page-table walk of `va` in the current payload's space (for the P6 fault
+/// frame). None if no payload is running.
+pub fn current_pagewalk(va: usize) -> Option<mm::WalkChain> {
+    Some(current_space()?.walk(va))
 }
 
 pub fn on_exit(code: usize) {
@@ -404,8 +505,10 @@ pub fn emit_denied(syscall: &str, cap: &str) {
 pub fn emit_output(ptr: usize, len: usize) -> Result<(), ()> {
     let mut buf = [0u8; WRITE_QUOTA];
     let n = len.min(WRITE_QUOTA);
-    let offset = ptr.checked_sub(hal::ARENA_BASE).ok_or(())?;
-    if !hal::arena_read(offset, &mut buf[..n]) {
+    // Read the payload's bytes through its own page table — a bad pointer is
+    // rejected here (EFAULT), never a kernel access.
+    let space = current_space().ok_or(())?;
+    if !space.copy_from_user(ptr, &mut buf[..n]) {
         return Err(());
     }
     let pid = current_pid().unwrap_or(NO_PID);

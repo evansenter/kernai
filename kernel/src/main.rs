@@ -8,8 +8,10 @@
 mod console;
 mod elf;
 mod events;
+mod frames;
 #[allow(unsafe_code)]
 mod hal;
+mod mm;
 mod payload;
 mod syscall;
 mod traps;
@@ -29,7 +31,8 @@ pub fn kmain(_hartid: usize, _dtb: usize) -> ! {
     );
     f.emit();
 
-    payload::assert_arena_clear();
+    payload::assert_pool_clear();
+    payload::init_paging(); // Sv39 on; the kernel runs identity-mapped
     hal::traps_init();
     traps::arm_first_tick();
     hal::enable_timer_interrupts();
@@ -44,6 +47,7 @@ pub fn kmain(_hartid: usize, _dtb: usize) -> ! {
 ///   'x' → deliberately execute a kernel illegal instruction (M2 accept. 3)
 ///   'p' → run the M3 payload suite (clean payload + a crash)
 ///   'm' → run the M4 payload suite (caps, spawn attenuation, deadline kill)
+///   'i' → run the M5 isolation suite (out-of-bounds, W^X, kernel-access faults)
 pub fn idle() -> ! {
     loop {
         match hal::console_getchar() {
@@ -55,6 +59,10 @@ pub fn idle() -> ! {
             }
             Some(b'm') => {
                 payload::seed_suite_m4();
+                payload::run();
+            }
+            Some(b'i') => {
+                payload::seed_suite_m5();
                 payload::run();
             }
             _ => hal::wait_for_interrupt(), // park until the next tick

@@ -130,7 +130,8 @@ def m3_user_payloads():
         start = _await(q, "payload_start", seen)
         assert start["name"] == "hello", f"first payload not hello: {start}"
         assert start["caps"] == ["write"], f"unexpected caps: {start}"
-        assert int(start["entry"], 16) >= 0x8040_0000, f"entry not in arena: {start}"
+        # Payloads run in their own address space at a low user VA (M5).
+        assert 0 < int(start["entry"], 16) < 0x8000_0000, f"entry not a user VA: {start}"
 
         out = _await(q, "payload_output", seen)
         assert out["pid"] == start["pid"], f"output pid mismatch: {out}"
@@ -225,6 +226,50 @@ def m4_caps_spawn_deadline():
 
         ids = [e["id"] for e in seen]
         assert ids == sorted(set(ids)), f"event ids not strictly monotonic: {ids}"
+
+
+@milestone("m5")
+def m5_memory_isolation():
+    """Per-payload paging (Sv39): a payload reading kernel memory faults
+    (isolation), a payload writing its own code faults (W^X), each fault
+    report carries the page-table walk, and the kernel survives both — a
+    clean payload runs afterward in its own address space."""
+    from .qemu import QemuKernel
+    with QemuKernel() as q:
+        seen = []
+        _await(q, "hello", seen)
+        q.send(b"i")
+        done = _await(q, "suite_done", seen)
+
+        faults = [e for e in seen if e["type"] == "fault"]
+        by_pid = {e["pid"]: e for e in faults}
+
+        # wild (pid 0): U-mode read of kernel memory → load page fault. The
+        # page-table walk shows the kernel page is present but U=0.
+        wild = by_pid[0]
+        assert wild["origin"] == "payload", f"wild fault not attributed: {wild}"
+        assert wild["cause_name"] == "load_page_fault", f"wrong cause for wild: {wild}"
+        assert int(wild["stval"], 16) >= 0x8000_0000, f"wild didn't reach kernel VA: {wild}"
+        assert wild["pagewalk"], f"wild fault missing page-table walk: {wild}"
+        assert wild["pagewalk"][-1]["u"] == 0, \
+            f"kernel page should be supervisor-only (u=0): {wild['pagewalk']}"
+
+        # wxviol (pid 1): write to own code → store page fault. The walk's leaf
+        # shows the text page is executable but not writable (W^X).
+        wx = by_pid[1]
+        assert wx["cause_name"] == "store_page_fault", f"wrong cause for wxviol: {wx}"
+        leaf = wx["pagewalk"][-1]
+        assert leaf["x"] == 1 and leaf["w"] == 0, f"W^X not enforced on text page: {leaf}"
+
+        # A clean payload ran last and exited — the kernel survived both faults.
+        assert any(e["type"] == "payload_exit" and e["code"] == 0 for e in seen), \
+            "clean payload did not run after the isolation faults"
+        assert done["exited"] == 1 and done["faulted"] == 2, f"unexpected suite result: {done}"
+
+        # Liveness after two page faults.
+        q.send(b"r")
+        ring = _await(q, "trap_ring", seen)
+        assert ring["count"] >= 4, f"kernel unresponsive after isolation suite: {ring}"
 
 
 @milestone("hardening")
