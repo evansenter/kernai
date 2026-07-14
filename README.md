@@ -1,7 +1,8 @@
 # kernai
 
 An agent-native RISC-V unikernel. See `docs/RFC-001-agent-native-kernel.md` for
-the thesis and `CLAUDE.md` for working conventions.
+the thesis and `CLAUDE.md` for working conventions. New here — or new to
+kernels entirely? Start with `docs/WALKTHROUGH.md`, then run `make demo`.
 
 Current state: **M2** (boot, traps, SBI timer, trap ring buffer, structured
 fault reports). See `docs/HANDOFF.md` for the exact next step.
@@ -27,8 +28,10 @@ rustup target list --installed --toolchain nightly-2026-07-14 | grep riscv64gc
 ```sh
 make build   # build the kernel ELF (release)
 make run     # boot it under QEMU (-icount, deterministic) with serial on stdio
-make test    # full acceptance suite: framing (M0), boot (M1), traps/timer/fault (M2)
-             # plus ci/unsafe_budget.sh — this is what CI runs
+make demo    # narrated tour: boot, ticks, ring query, fault report, determinism
+make test    # full acceptance suite: framing (M0), boot (M1), traps/timer/fault
+             # (M2), input hardening, determinism, demo — plus unsafe budget;
+             # this is what CI runs
 make debug   # boot QEMU halted with a gdb stub on :1234
 make gdb     # attach gdb-multiarch to a running `make debug`
 ```

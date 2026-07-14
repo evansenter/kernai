@@ -105,6 +105,32 @@ def m2_traps_timer_fault():
             raise AssertionError("kernel hung after fault report instead of shutting down")
 
 
+@milestone("hardening")
+def hardening_garbage_input():
+    """Garbage serial bytes are ignored; the ring query still answers; 200
+    ticks stay contiguous and monotonic under continuous input noise."""
+    from .qemu import QemuKernel
+
+    # Anything except the real commands 'r' and 'x'.
+    noise = b"\x00\x01\xfe\xffAZ09!@#\n\r\t\xaa\x99qQRX"
+    with QemuKernel() as q:
+        seen = []
+        _await(q, "hello", seen)
+        ticks = []
+        while len(ticks) < 200:
+            q.send(noise)
+            ticks.append(_await(q, "tick", seen))
+        assert [t["seq"] for t in ticks] == list(range(1, 201)), \
+            "ticks lost or reordered under input noise"
+        assert all(e["type"] in ("hello", "tick") for e in seen), \
+            f"noise triggered an unexpected event: {[e for e in seen if e['type'] not in ('hello', 'tick')]}"
+        q.send(b"r")
+        ring = _await(q, "trap_ring", seen)
+        assert ring["count"] >= 200, f"ring lost traps: {ring}"
+        ids = [e["id"] for e in seen]
+        assert ids == sorted(set(ids)), "event ids not strictly monotonic under noise"
+
+
 @milestone("determinism")
 def determinism_two_boots():
     """P9 seed (E6): two input-free boots yield byte-identical event streams."""
@@ -122,6 +148,16 @@ def determinism_two_boots():
     a, b = capture(), capture()
     for i, (fa, fb) in enumerate(zip(a, b)):
         assert fa == fb, f"boot diverged at frame {i}: {fa!r} != {fb!r}"
+
+
+@milestone("demo")
+def demo_runs_clean():
+    """The narrated demo (make demo) completes without an assertion firing."""
+    proc = subprocess.run(
+        [sys.executable, "-m", "harness.demo", "--fast"],
+        capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise AssertionError(f"demo failed:\n{proc.stdout[-2000:]}\n{proc.stderr[-2000:]}")
 
 
 def main(argv):

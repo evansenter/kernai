@@ -1,0 +1,171 @@
+"""`make demo` — a narrated tour of everything the kernel can do so far,
+written for someone who has never touched a kernel. Run with --fast to skip
+the dramatic pauses (the acceptance suite does).
+"""
+
+import json
+import subprocess
+import sys
+import time
+
+from .qemu import KERNEL_ELF, QemuKernel
+
+FAST = "--fast" in sys.argv
+TTY = sys.stdout.isatty()
+
+BOLD = "\033[1m" if TTY else ""
+DIM = "\033[2m" if TTY else ""
+CYAN = "\033[36m" if TTY else ""
+RESET = "\033[0m" if TTY else ""
+
+
+def say(text=""):
+    print(f"{BOLD}{text}{RESET}")
+    sys.stdout.flush()
+    if not FAST:
+        time.sleep(0.06 * min(len(text), 20))
+
+
+def show(evt):
+    print(f"{CYAN}    {json.dumps(evt)}{RESET}")
+    sys.stdout.flush()
+
+
+def note(text):
+    for line in text.strip("\n").splitlines():
+        print(f"{DIM}    {line}{RESET}")
+    sys.stdout.flush()
+    if not FAST:
+        time.sleep(0.8)
+
+
+def get(q, evt_type):
+    while True:
+        evt = q.next_event(60)
+        assert evt is not None, "kernel exited unexpectedly"
+        if evt["type"] == evt_type:
+            return evt
+
+
+def main():
+    say()
+    say("kernai demo — a tiny operating-system kernel you can talk to")
+    note("""
+A kernel is the first real program a computer runs: it owns the hardware and
+supervises everything else. This one is deliberately tiny, runs on an
+emulated RISC-V computer (QEMU), and reports everything it does as
+machine-readable JSON events instead of human log lines — because its
+intended operator is an AI agent, not a person at a terminal.
+""")
+
+    say("[1/5] Booting an emulated RISC-V computer...")
+    note("""
+QEMU emulates the whole machine: CPU, memory, a serial port (think: a wire
+for bytes). A small piece of firmware called OpenSBI (the machine's
+"BIOS") starts first, prints a text banner, and then hands control to our
+kernel. The harness skips the banner and locks onto the kernel's framed
+events.
+""")
+    with QemuKernel() as q:
+        hello = get(q, "hello")
+        say("The kernel's first words — event #0:")
+        show(hello)
+        note("""
+Every event is JSON with a globally increasing "id". The hello frame is the
+kernel saying "I'm alive, I speak protocol 0".
+""")
+
+        say("[2/5] Watching the kernel's heartbeat (timer interrupts)...")
+        note("""
+The kernel asked the hardware for a timer that fires every 10,000 timebase
+units — under deterministic emulation that is exactly every 500,000 CPU
+instructions, never wall-clock time. Each time it fires, the CPU drops
+whatever it's doing and jumps into the kernel's trap handler ("trap" =
+any event that interrupts normal execution), which records it and emits a
+tick event.
+""")
+        ticks = [get(q, "tick") for _ in range(3)]
+        for t in ticks:
+            show(t)
+        note("""
+"seq" counts ticks; "time" is the timebase clock. Note the ids and times
+increase in lockstep — the event stream is the kernel's diary.
+""")
+
+        say("[3/5] Asking the kernel what happened recently (introspection)...")
+        note("""
+Classic kernels keep their internal state hidden — you attach a debugger to
+see it. This kernel's design principle P11 says: no state observable only
+via debugger. So it keeps a ring buffer of the last 8 traps, and we can
+query it live by sending a single byte, 'r', over the serial port:
+""")
+        q.send(b"r")
+        ring = get(q, "trap_ring")
+        show(ring)
+        note("""
+"count" is every trap since boot; "entries" are the most recent ones —
+all timer ticks so far, each with the program counter ("sepc") where the
+CPU was interrupted. This is the seed of the kernel-as-queryable-database
+idea the whole project is built around.
+""")
+
+        say("[4/5] Deliberately crashing it (the good part)...")
+        note("""
+Now we send 'x', which tells the kernel to execute an instruction that is
+forbidden by the CPU spec: writing to the read-only 'cycle' counter
+register. A normal kernel would print a hex dump and hang. Ours must emit
+a structured fault report designed so that an AI agent can localize the
+bug from the report alone (principle P6) — then shut down cleanly.
+""")
+        q.send(b"x")
+        fault = get(q, "fault")
+        show(fault)
+        note("""
+Reading it like the kernel does:
+  cause/cause_name  what kind of trap: an illegal instruction
+  sepc              the exact address of the offending instruction
+  stval             the instruction's raw bits, straight from the CPU
+  insn              those bits decoded: opcode 0x73 = a SYSTEM instruction,
+                    and csr 0xc00 is the read-only cycle counter — i.e. the
+                    report doesn't just say "illegal", it shows you WHY
+  ra/sp             return address + stack pointer at the moment of the trap
+  ring              the last 8 traps before death — the flight recorder
+""")
+        try:
+            q.wait_exit(30)
+            say("The kernel reported the fault and shut the machine down — no hang.")
+        except subprocess.TimeoutExpired:
+            raise AssertionError("kernel hung after fault report")
+
+    say("[5/5] Proving determinism (run it again, get identical bytes)...")
+    note("""
+The emulator is configured so virtual time is computed from the instruction
+count (-icount), not the host clock. Same program + same inputs = the same
+events, byte for byte, every single run. That's principle P9: any bug an
+agent ever sees is exactly reproducible.
+""")
+    def capture():
+        frames = []
+        with QemuKernel() as q2:
+            while len(frames) < 4:
+                frames.append(q2.stream.next_frame(timeout=60))
+        return frames
+
+    a, b = capture(), capture()
+    for fa, fb in zip(a, b):
+        assert fa == fb, "boots diverged — determinism broken!"
+        show(json.loads(fa))
+    say(f"Two fresh boots produced identical streams ({len(a)} frames compared).")
+    note("""
+That's M0-M2: a talking, introspectable, deterministic kernel skeleton.
+Next up (M3): running a separate user program *under* the kernel, in
+unprivileged mode. See docs/WALKTHROUGH.md for the full guided tour and
+docs/RFC-001-agent-native-kernel.md for where this is going.
+""")
+
+
+if __name__ == "__main__":
+    if not KERNEL_ELF.exists():
+        print("kernel not built — run `make build` first", file=sys.stderr)
+        sys.exit(1)
+    main()

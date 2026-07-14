@@ -7,7 +7,7 @@
 TARGET     := riscv64gc-unknown-none-elf
 KERNEL_ELF := kernel/target/$(TARGET)/release/kernai
 
-.PHONY: build run debug gdb test fmt clippy unsafe-budget clean
+.PHONY: build run debug gdb demo test fmt clippy unsafe-budget clean
 
 build:
 	cd kernel && cargo build --release
@@ -21,6 +21,10 @@ debug: build
 
 gdb:
 	gdb-multiarch $(KERNEL_ELF) -ex "target remote localhost:1234"
+
+# Narrated tour of M0-M2 for humans (docs/WALKTHROUGH.md is the readable twin).
+demo: build
+	python3 -m harness.demo
 
 test: unsafe-budget fmt clippy build
 	python3 -m harness.runner all
