@@ -3,9 +3,9 @@
 Rewritten at the end of every session. Assume the reader has zero context
 beyond this repo (we dogfood E3 on ourselves).
 
-## Current state (2026-07-14, session 1)
+## Current state (2026-07-14, session 2)
 
-**M0–M4 complete and green.** `make test` from a fresh clone runs eight
+**M0–M5 complete and green.** `make test` from a fresh clone runs nine
 checks in a few seconds:
 
 1. `m0` — framing round-trips over a real pipe (loopback stub)
@@ -18,21 +18,24 @@ checks in a few seconds:
 5. `m4` — capability enforcement (ENOCAP + `syscall_denied` event), spawn
    with attenuation (`granted ⊆ parent`, P10), instruction-count deadline
    kill of a runaway (`payload_killed`), post-suite liveness
-6. `hardening` — 200 ticks contiguous under garbage serial input
-7. `determinism` — two input-free boots byte-identical (P9 / E6 seed)
-8. `demo` — the narrated `make demo` (now M0–M4) completes
+6. `m5` — per-payload Sv39 paging: a payload reading kernel memory faults
+   (isolation), a payload writing its own code faults (W^X), each fault
+   frame carries the page-table walk, kernel survives both
+7. `hardening` — 200 ticks contiguous under garbage serial input
+8. `determinism` — two input-free boots byte-identical (P9 / E6 seed)
+9. `demo` — the narrated `make demo` completes
 
 CI (`.github/workflows/ci.yml`) runs the same gate + `ci/unsafe_budget.sh`
-on every push. **Unsafe budget: 59/200 lines in 4/4 hal files** — the file
-cap is fully used; M5's paging code must extend `hal/csr.rs` / `hal/boot.rs`
-/ `hal/trap.rs`, never add a 5th unsafe file.
+on every push. **Unsafe budget: 71/200 lines in 4/4 hal files** — the file
+cap is fully used; new hal code must extend `hal/csr.rs` / `hal/boot.rs` /
+`hal/trap.rs`, never add a 5th unsafe file.
 
-M3+M4 were adversarially audited by five parallel reviewers (trap/privilege
-asm, ELF loader, capability soundness, hal unsafe/budget, acceptance rigor).
-One HIGH (an `sscratch` desync race in `enter_user` that could put the kernel
-trap frame on a payload's stack) and several LOW findings were fixed — see
-the last DECISIONS.md entry. No capability-widening path, sound arena
-bounds-checking, zero flakiness.
+M3+M4 were adversarially audited by five parallel reviewers; the one HIGH
+(an `sscratch` desync race in `enter_user`) and several LOW findings were
+fixed. M5 (paging) is new this session and has NOT yet had a dedicated
+adversarial audit — that is a priority follow-up (the page-table code, the
+satp-switch window in `enter_user`, and the frame reaper are the sensitive
+spots).
 
 Toolchain: nightly-2026-07-14 (rust-toolchain.toml), QEMU 8.2.2
 (`qemu-system-misc`), gdb-multiarch 15.1. `make build` builds the payload
@@ -41,14 +44,18 @@ workspace first (the kernel embeds their ELFs), then the kernel.
 ## What the operator can do (single serial command bytes)
 
 `r` dump trap ring · `x` crash the kernel (illegal instr → shutdown) ·
-`p` run the M3 payload suite · `m` run the M4 sandbox suite.
+`p` M3 payload suite · `m` M4 sandbox suite · `i` M5 isolation suite.
 
 ## Known-broken / caveats
 
 - Nothing known-broken.
-- One payload is resident at a time (no paging); `yield` is a no-op
-  reschedule and `spawn`'d children run after the parent (sequential). All
-  three go away at M5 with per-payload address spaces.
+- Payloads still run sequentially (run-to-completion); `yield` is a no-op
+  reschedule and `spawn`'d children run after the parent. Address spaces are
+  isolated now, but concurrent scheduling waits for the full-frame
+  suspend/resume switch that M6's checkpoint machinery builds.
+- `enter_user` does not scrub the register file, so a fresh payload could
+  read a stale kernel register value. Low risk (no secrets yet); scrub when
+  M8/M9 add sensitive state.
 - Deadlines are in timebase units (deterministic instruction proxy under
   -icount), not exact retired-instruction counts — see DECISIONS.md.
 - The budget script's SAFETY-comment walk is looser than clippy's; clippy's
@@ -56,23 +63,24 @@ workspace first (the kernel embeds their ELFs), then the kernel.
 
 ## Exact next step
 
-**M5: paging + isolation suite.** Per the RFC ladder. Concretely:
+**M6: checkpoint/restore + speculative fork (P8).** Per the RFC ladder. The
+per-payload address space (M5) makes this tractable — the whole state is the
+page table + the trap frame + the CapSet.
 
-1. `hal/` gains Sv39 page-table types and a `satp` switch (extend
-   `hal/csr.rs` + a new safe `mm.rs`/`paging` module above hal for the safe
-   table-building logic; keep the raw satp write and TLB flush in hal). A
-   `FrameAllocator` (safe, plain-data — P11) hands out physical frames.
-2. Each process slot gains a page-table root; the loader maps the payload's
-   segments into its own address space instead of the shared arena, so
-   multiple payloads can be resident. The scheduler's single-resident
-   assumption (payload.rs) and `enter_user`/`redirect_to_scheduler` grow a
-   real suspend/resume switch (full-frame, in `hal/trap.rs` global_asm — no
-   new inline-unsafe budget).
-3. Isolation suite: a payload that reads/writes outside its map faults
-   (store/load page fault, `origin:"payload"`); W^X enforced; one payload
-   cannot see another's memory. Acceptance: the fault frame's page-table walk
-   (the M9 P6 growth can start here) shows the bad access.
+1. `snapshot(pid) -> blob`: serialize a payload's address space (walk its
+   page table, copy each user frame + its VA/perms), register file (the saved
+   trap frame), and CapSet into a versioned blob. A payload is snapshottable
+   only when parked at a syscall boundary (its frame is saved) — add a
+   `sys_checkpoint` or an operator command that parks it.
+2. `restore(blob) -> pid`: allocate a fresh address space, re-map the frames
+   from the blob, install the register file, resume.
+3. `fork_from(blob)`: restore into a NEW pid so two continuations can run
+   from the same checkpoint (the what-if verb, RFC demo 2).
+4. Acceptance: snapshot a payload mid-run, restore it, and the restored
+   payload produces the identical continuation (byte-identical events under
+   -icount); fork produces two independent pids.
 
-Before starting: re-read CLAUDE.md's milestone gate — M4 must stay green in
-CI on every push, and the unsafe file cap (4) is already reached, so plan
-M5's unsafe as edits to the existing hal files.
+Blob format: postcard/CBOR would be self-describing (P5) but adds a
+dependency; a raw versioned header keeps zero-dep. Decide and log.
+Before starting: M5 deserves a dedicated adversarial audit first (page-table
+code, satp window, frame reaper) — do that, then M6.

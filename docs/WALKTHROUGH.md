@@ -147,11 +147,11 @@ Three things:
   dedicated region of memory (the "arena", at `0x80400000`), then dropped to
   user mode to run it. `payload_start` announces this; `caps` is the program's
   **capability set** — the exact list of privileged operations it's allowed
-  to request. This one may `write`, nothing else. (The isolation so far is at
-  the *privilege* level — a payload can't run privileged instructions — and
-  the *fault* level — a crash is contained. True *memory* isolation, where a
-  payload physically cannot read the kernel's memory, needs paging and arrives
-  at M5; today the arena is a convention, not yet a hardware fence.)
+  to request. This one may `write`, nothing else. (Isolation is at three
+  levels: *privilege* — a payload can't run privileged instructions;
+  *fault* — a crash is contained; and, since M5, *memory* — the MMU gives
+  each payload its own page table so it physically cannot read the kernel's
+  or another payload's memory. See the M5 section below.)
 - **Output is tagged `"untrusted": true`.** Bytes coming *from* a workload are
   data, never instructions — the kernel confines them to a JSON string and
   never lets them be read as commands by itself or its operator (principle P7:
@@ -194,11 +194,37 @@ memory fencing) is boring and autonomous; every *policy* decision — grant,
 deny, attenuate, kill — is an observable structured event, which is exactly
 what an AI operator needs to supervise the system.
 
+## Memory isolation (M5)
+
+Send `i`. The CPU has a **memory management unit** (MMU) that can translate
+every address a program uses through a **page table** — a per-program map
+from "virtual" addresses the program sees to real physical memory. The
+kernel now builds a private page table for each payload: its own code and
+data, plus the kernel's memory marked *supervisor-only*. Two fixtures probe
+the walls:
+
+- **`wild`** reads kernel address `0x80200000`. It gets a `load_page_fault`,
+  and the fault frame includes a **page-table walk**: the kernel's page is
+  present but `"u": 0` (supervisor-only), so a user program touching it
+  faults. Before M5 there was no MMU and this read would have succeeded —
+  that was the memory-isolation gap M5 closes.
+- **`wxviol`** tries to overwrite its own code. It gets a `store_page_fault`;
+  the walk's leaf shows the code page is `"x": 1` (executable) but `"w": 0`
+  (not writable). This is **W^X** (write-xor-execute): code can't be
+  rewritten, data can't be executed — a whole class of exploits made
+  structurally impossible.
+
+Both faults kill only the offending payload; a clean payload runs afterward
+in its own fresh address space. The page-table walk in the fault frame is
+the beginning of the RFC's "errors are prompts" goal (P6): the report tells
+the operator not just *that* it faulted but *why*, down to the permission
+bit.
+
 ## Try it yourself
 
 ```sh
 make demo    # the narrated version of everything above (M0-M4)
-make run     # raw boot; then press: r (ring) x (crash kernel) p (M3) m (M4)
+make run     # raw boot; then press: r (ring) x (crash) p (M3) m (M4) i (M5)
 make test    # the full acceptance gate (framing, boot, traps, payloads,
              # sandbox, hardening, determinism, demo) — a few seconds
 make debug   # boot frozen at the first instruction, gdb stub listening

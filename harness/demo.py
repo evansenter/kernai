@@ -61,7 +61,7 @@ machine-readable JSON events instead of human log lines — because its
 intended operator is an AI agent, not a person at a terminal.
 """)
 
-    say("[1/5] Booting an emulated RISC-V computer...")
+    say("[1/8] Booting an emulated RISC-V computer...")
     note("""
 QEMU emulates the whole machine: CPU, memory, a serial port (think: a wire
 for bytes). A small piece of firmware called OpenSBI (the machine's
@@ -78,7 +78,7 @@ Every event is JSON with a globally increasing "id". The hello frame is the
 kernel saying "I'm alive, I speak protocol 0".
 """)
 
-        say("[2/5] Watching the kernel's heartbeat (timer interrupts)...")
+        say("[2/8] Watching the kernel's heartbeat (timer interrupts)...")
         note("""
 The kernel asked the hardware for a timer that fires every 10,000 timebase
 units — under deterministic emulation that is exactly every 500,000 CPU
@@ -95,7 +95,7 @@ tick event.
 increase in lockstep — the event stream is the kernel's diary.
 """)
 
-        say("[3/5] Asking the kernel what happened recently (introspection)...")
+        say("[3/8] Asking the kernel what happened recently (introspection)...")
         note("""
 Classic kernels keep their internal state hidden — you attach a debugger to
 see it. This kernel's design principle P11 says: no state observable only
@@ -112,7 +112,7 @@ CPU was interrupted. This is the seed of the kernel-as-queryable-database
 idea the whole project is built around.
 """)
 
-        say("[4/7] Running a user program under the kernel...")
+        say("[4/8] Running a user program under the kernel...")
         note("""
 So far everything has been the kernel itself. Now we send 'p' to load two
 small *user* programs — separate compiled binaries — and run them in
@@ -152,7 +152,7 @@ user program crashing is an event, not a catastrophe (principle P1).
         show(get(q, "suite_done"))
         note('suite_done: one program exited cleanly, one faulted. The kernel is fine.')
 
-        say("[5/7] The sandbox: capabilities, delegation, and runaway control...")
+        say("[5/8] The sandbox: capabilities, delegation, and runaway control...")
         note("""
 Send 'm' for four more programs that show the kernel enforcing policy:
   • a "muzzled" program with NO capabilities tries to print — denied
@@ -198,7 +198,47 @@ machine by spinning. Because time here is measured in instructions, not
 the wall clock, this kill happens at the EXACT same point every single run.
 """)
 
-        say("[6/7] Deliberately crashing the kernel itself (the good part)...")
+        say("[6/8] Memory isolation: each program gets its own private memory...")
+        note("""
+Send 'i'. Until now, nothing physically stopped a user program from reaching
+into the kernel's memory — there was no memory management unit (MMU) turned
+on. Now each program runs in its own "address space": a private map (a page
+table) the CPU's MMU enforces. Two programs:
+  • "wild" tries to read the kernel's memory
+  • "wxviol" tries to overwrite its own code
+""")
+        q.send(b"i")
+        iso = []
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            e = q.next_event(30)
+            assert e is not None, "kernel exited during M5 suite"
+            if e["type"] == "tick":
+                continue
+            iso.append(e)
+            if e["type"] == "suite_done":
+                break
+        wild = next(e for e in iso if e["type"] == "fault" and e["pid"] == 0)
+        show({k: wild[k] for k in ("type", "origin", "cause_name", "stval", "pagewalk")})
+        note("""
+"wild" reached for kernel address 0x80200000 and got a load_page_fault. Look
+at "pagewalk" — the kernel's page is present but "u": 0, meaning
+supervisor-only. A user program touching it faults. The kernel is now
+genuinely walled off from the programs it runs (the isolation the earlier
+milestones deferred to here).
+""")
+        wx = next(e for e in iso if e["type"] == "fault" and e["pid"] == 1)
+        show({k: wx[k] for k in ("type", "cause_name", "pagewalk")})
+        note("""
+"wxviol" tried to write to its own code and got a store_page_fault. The
+pagewalk's last entry shows the code page is "x": 1 (executable) but "w": 0
+(not writable) — "W^X", write-XOR-execute. Code can't be rewritten and data
+can't be run; a whole class of exploits is structurally impossible. Both
+faults killed only the offending program; the kernel ran a clean program
+right after, in its own fresh address space.
+""")
+
+        say("[7/8] Deliberately crashing the kernel itself (the good part)...")
         note("""
 Now we send 'x', which tells the kernel to execute an instruction that is
 forbidden by the CPU spec: writing to the read-only 'cycle' counter
@@ -226,7 +266,7 @@ Reading it like the kernel does:
         except subprocess.TimeoutExpired:
             raise AssertionError("kernel hung after fault report")
 
-    say("[7/7] Proving determinism (run it again, get identical bytes)...")
+    say("[8/8] Proving determinism (run it again, get identical bytes)...")
     note("""
 The emulator is configured so virtual time is computed from the instruction
 count (-icount), not the host clock. Same program + same inputs = the same

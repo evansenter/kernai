@@ -241,3 +241,40 @@ findings were fixed:
 Reviewers confirmed no capability-widening path, sound arena bounds-checking,
 correct budget accounting (now 59/200, 4/4 files), and zero flakiness
 (m3 15/15, m4 15/15, deterministic deadline kill).
+
+**2026-07-14 · M5 · PROVISIONAL · Per-payload Sv39 address spaces; kernel is a supervisor gigapage in every table.**
+Each payload gets its own root page table mapping its ELF segments at a low
+user VA (0x10000) with W^X from the program headers, plus a single 1 GiB
+supervisor gigapage identity-mapping kernel RAM (0x8000_0000, U=0). Rationale:
+a trap doesn't switch satp, so the handler runs under the payload's table and
+the kernel must be mapped in it — a supervisor (U=0) gigapage is one PTE, keeps
+the kernel accessible to S-mode, and faults any U-mode access (the isolation
+win). Payloads relink to a low VA so user and kernel VAs never overlap.
+Alternative — a trampoline that switches satp on trap entry (xv6-style) — is
+stricter (kernel not mapped in user tables at all) but needs an identically
+mapped trampoline page; deferred, not needed for the isolation guarantee.
+
+**2026-07-14 · M5 · Frame allocator is a bitmap; page tables built in safe code over hal::phys_*.**
+A plain AtomicU64 bitmap over the pool (former arena region), alloc/free with
+zeroing. Page-table reads/writes go through bounds-checked hal::phys_read_u64/
+write_u64, so mm.rs and elf.rs stay #![forbid(unsafe_code)] — the only paging
+unsafe is the satp write + sfence in hal (budget 71/200). Frames are reaped
+when a payload terminates (scheduler destroys its address space under the
+kernel satp, never while the payload table is active), so repeated runs don't
+leak — verified across 3 back-to-back isolation suites.
+
+**2026-07-14 · M5 · Payloads still run sequentially (run-to-completion); yield stays a no-op.**
+Address spaces are now isolated, but the scheduler keeps the M4 sequential
+model (one payload at a time, spawn'd children queued). True cooperative/
+preemptive multitasking needs full-frame suspend/resume, which the checkpoint
+machinery (M6) builds anyway — fold the switch in there. yield remains
+cap-gated + eventful but resumes the caller. The M5 acceptance (isolation) is
+independent of concurrent scheduling.
+
+**2026-07-14 · M5 · Payload PHDRS force three page-aligned segments.**
+An empty output section's ALIGN is dropped by lld, which let a payload's data
+segment share a page with .text (and, worse, land in an R-only segment — a
+non-writable stack that only trivial payloads survived). Fixed with explicit
+PHDRS (text R+X, rodata R, data R+W) plus bare `. = ALIGN(0x1000)` statements
+between segments, so every segment starts on its own page with correct W^X
+permissions. The loader relies on this (one page is never mapped twice).
