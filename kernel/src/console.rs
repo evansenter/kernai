@@ -18,7 +18,11 @@ pub struct FrameBuf {
 }
 
 impl FrameBuf {
-    pub const CAPACITY: usize = 1024;
+    /// 2 KiB: sized so the worst-case fault frame (full ring history plus
+    /// max-width u64 fields ≈ 1.1 KiB) can never poison itself into silence
+    /// — a fault report that vanishes is the one failure P6 forbids. Events
+    /// are still designed small (P3); this is headroom, not a target.
+    pub const CAPACITY: usize = 2048;
 
     pub const fn new() -> Self {
         FrameBuf {

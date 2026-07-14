@@ -99,3 +99,44 @@ harden and demo M0–M2, do NOT start M3 (original brief was explicit:
 "Stop there"). Added to the permanent gate: 200-tick monotonicity under
 garbage input, byte-identical double-boot (E6 seed), and the narrated demo
 itself. The full gate stays under ~5s so nobody is tempted to skip it.
+
+**2026-07-14 · M2 · Corrections + fixes from the adversarial review pass.**
+Six parallel reviewers (asm, kernel logic, harness, budget script, compliance,
+docs) audited the tree; confirmed findings were fixed rather than argued with:
+- *Budget scanner hardened*: it didn't know Rust raw strings — a crafted
+  `r#"..."#` could desync it and hide real `unsafe` (verified exploit); the
+  `#![forbid(unsafe_code)]` check also accepted the attribute inside a
+  comment/string. Both fixed and covered by attack fixtures during review.
+- *Harness watchdogs were per-frame, not total*: a kernel that kept ticking
+  but never answered a query would hang `make test` forever. `_await`, the
+  demo's `get`, and the demo subprocess now carry whole-wait deadlines.
+- *FrameBuf grew 1 KiB → 2 KiB*: the worst-case fault frame (~1.1 KiB) could
+  exceed 1 KiB and poison itself into silence — the one failure P6 forbids.
+- *Panic handler* now masks interrupts around emission (no tick bytes
+  interleaved into a dying kernel's last words), guards against recursive
+  panic, and JSON-escapes the location.
+- *Tick cadence made exact*: re-arm from the previous deadline instead of
+  "now", so ticks land exactly TICK_INTERVAL apart (was +1–3 units of
+  handler-latency drift per tick). Clamped forward to prevent catch-up
+  storms.
+- *asm contracts*: `wfi` and the deliberate illegal instruction dropped
+  `nomem` (the trap handler they lead into mutates memory); the latter is
+  `options(noreturn)` now.
+- *Record corrections*: the M0 entry's "Makefile QEMU_BASE variable" never
+  existed — the single home of the QEMU flags is `harness/qemu.py::qemu_args()`,
+  which every make target routes through. The M2 entry's "~66 ecalls" was
+  wrong: a tick frame is 50 wire bytes (≈50 putchar ecalls), a full ring dump
+  ~420, a fault frame ~600 — all still ≪ the 500k-instruction tick interval.
+  And "without_interrupts wraps every frame" overstated: hello is pre-enable
+  and tick/fault are trap-context; only ring-dump/panic take the wrapper.
+- *README bootstrap* gained `gcc` and `curl` (fresh Ubuntu lacks a host `cc`;
+  CI runners had masked it). Harness pinned back to python ≥ 3.9 via
+  `from __future__ import annotations`.
+
+**2026-07-14 · M2 · PROVISIONAL · Kernel floating point is forbidden.**
+The riscv64gc target has a hard-float ABI, but the kernel never enables
+sstatus.FS, so OpenSBI's FS=Off means any FP instruction traps as
+illegal_instruction — loudly, through our own structured fault path. That is
+the enforcement: no FP in kernel code (none exists today; verified by
+disassembly during review). If FP is ever wanted, the trap frame must first
+grow F/D register save/restore and FS management. Revisit no earlier than M5.

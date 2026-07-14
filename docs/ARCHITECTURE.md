@@ -47,10 +47,13 @@ timer, then loop: poll `console_getchar` for command bytes, `wfi` otherwise.
 
 ## Invariants worth defending
 
-- **Emission is atomic**: frame bytes + id allocation happen with interrupts
-  disabled (`without_interrupts`), so frames can't interleave on the wire
-  and event ids strictly increase in stream order. The acceptance suite
-  asserts this stream-wide.
+- **Emission is atomic**: every emission path runs with interrupts masked —
+  tick/fault frames in trap context (hardware-masked), hello before
+  interrupts are enabled, ring-dump and panic frames under an explicit
+  `without_interrupts`. So frames can't interleave on the wire and event ids
+  strictly increase in stream order; the acceptance suite asserts this
+  stream-wide. Any new emission site outside those contexts must take the
+  wrapper.
 - **Determinism**: the QEMU command line exists in exactly one place
   (`harness/qemu.py`; `-icount shift=1,sleep=off -rtc clock=vm`). `make
   test` asserts two input-free boots are byte-identical (E6 seed).

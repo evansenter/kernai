@@ -6,6 +6,7 @@ AssertionError (with a readable message) on failure. `make test` runs `all`.
 
 import subprocess
 import sys
+import time
 
 MILESTONES = {}
 
@@ -42,9 +43,15 @@ def m1_boot_hello():
 
 def _await(q, evt_type, seen, timeout=60):
     """Read events until one of `evt_type` arrives; every event is appended
-    to `seen` so callers can assert stream-wide invariants afterwards."""
+    to `seen` so callers can assert stream-wide invariants afterwards.
+    `timeout` bounds the WHOLE wait — a kernel that keeps ticking but never
+    answers must fail the suite, not reset the watchdog per frame."""
+    deadline = time.monotonic() + timeout
     while True:
-        evt = q.next_event(timeout)
+        remaining = deadline - time.monotonic()
+        assert remaining > 0, \
+            f"no {evt_type} event within {timeout}s (last events: {seen[-3:]})"
+        evt = q.next_event(remaining)
         assert evt is not None, f"EOF while waiting for {evt_type}; stderr: {q.stderr_tail()}"
         seen.append(evt)
         if evt["type"] == evt_type:
@@ -153,9 +160,13 @@ def determinism_two_boots():
 @milestone("demo")
 def demo_runs_clean():
     """The narrated demo (make demo) completes without an assertion firing."""
-    proc = subprocess.run(
-        [sys.executable, "-m", "harness.demo", "--fast"],
-        capture_output=True, text=True)
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-m", "harness.demo", "--fast"],
+            capture_output=True, text=True, timeout=300)
+    except subprocess.TimeoutExpired as e:
+        out = (e.stdout or b"")[-2000:]
+        raise AssertionError(f"demo hung (>300s); last output:\n{out}") from e
     if proc.returncode != 0:
         raise AssertionError(f"demo failed:\n{proc.stdout[-2000:]}\n{proc.stderr[-2000:]}")
 

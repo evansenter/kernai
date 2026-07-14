@@ -38,6 +38,17 @@ smoke-tested: `make debug` + `break kernai::kmain` hits with source info.
   DECISIONS.md (framing format, transport-until-M8, console mechanism,
   operator-triggered fault injection).
 
+## Review pass
+
+Six parallel adversarial reviewers (asm, kernel logic, harness, budget
+script, compliance, docs accuracy) audited the tree; every confirmed finding
+was fixed the same session — see the "Corrections + fixes" entry in
+DECISIONS.md for the list (highlights: budget scanner learned raw strings,
+harness watchdogs became whole-wait deadlines, FrameBuf 2 KiB so fault
+frames can't poison into silence, panic handler hardened, exact tick
+cadence). The suite was re-stressed after the fixes: 15+ consecutive green
+full-suite runs total.
+
 ## Known-broken / caveats
 
 - Nothing known-broken.
@@ -45,9 +56,9 @@ smoke-tested: `make debug` + `break kernai::kmain` hits with source info.
   (~1 ms virtual) — fine now, revisit if command latency ever matters.
 - The determinism check covers input-free boots only; replaying *operator
   inputs* deterministically is the M7 story.
-- Workflow-orchestration tooling in this dev environment was flaky
-  (permission stream errors); adversarial review was run via parallel
-  subagents instead. No impact on the repo itself.
+- The budget script's SAFETY-comment walk is looser than clippy's (an
+  unrelated comment directly above an unsafe can satisfy it); clippy's
+  `undocumented_unsafe_blocks = deny` remains the authoritative check.
 
 ## Exact next step
 

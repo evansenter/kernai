@@ -39,9 +39,12 @@ def note(text):
         time.sleep(0.8)
 
 
-def get(q, evt_type):
+def get(q, evt_type, timeout=60):
+    deadline = time.monotonic() + timeout  # bounds the whole wait
     while True:
-        evt = q.next_event(60)
+        remaining = deadline - time.monotonic()
+        assert remaining > 0, f"no {evt_type} event within {timeout}s"
+        evt = q.next_event(remaining)
         assert evt is not None, "kernel exited unexpectedly"
         if evt["type"] == evt_type:
             return evt
@@ -148,7 +151,9 @@ agent ever sees is exactly reproducible.
         frames = []
         with QemuKernel() as q2:
             while len(frames) < 4:
-                frames.append(q2.stream.next_frame(timeout=60))
+                frame = q2.stream.next_frame(timeout=60)
+                assert frame is not None, f"EOF during capture; stderr: {q2.stderr_tail()}"
+                frames.append(frame)
         return frames
 
     a, b = capture(), capture()

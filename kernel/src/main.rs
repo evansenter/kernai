@@ -32,7 +32,7 @@ pub fn kmain(_hartid: usize, _dtb: usize) -> ! {
     f.emit();
 
     hal::traps_init();
-    hal::set_timer(hal::read_time() + traps::TICK_INTERVAL);
+    traps::arm_first_tick();
     hal::enable_timer_interrupts();
 
     loop {
@@ -46,22 +46,37 @@ pub fn kmain(_hartid: usize, _dtb: usize) -> ! {
 
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
+    use core::sync::atomic::{AtomicBool, Ordering};
+
+    // A panic inside this handler would recurse until the stack silently
+    // overwrote .bss (no guard page yet) — second entry goes straight down.
+    static IN_PANIC: AtomicBool = AtomicBool::new(false);
+    if IN_PANIC.swap(true, Ordering::Relaxed) {
+        hal::shutdown(true);
+    }
+
     // A panic is a kernel bug, but it still reports structure, not silence:
     // this frame is the earliest ancestor of the P6 diagnostic frame.
-    let mut f = FrameBuf::new();
-    let _ = write!(
-        f,
-        r#"{{"id":{},"type":"panic","location":""#,
-        events::next_id()
-    );
-    if let Some(loc) = info.location() {
-        let _ = write!(f, "{}:{}", loc.file(), loc.line());
-    }
-    let _ = f.write_str(r#"","msg":""#);
-    let mut msg = FmtCapture(&mut f);
-    let _ = write!(msg, "{}", info.message());
-    let _ = f.write_str(r#""}"#);
-    f.emit();
+    // Interrupts off for the whole build+emit — same no-interleaving
+    // guarantee every other emission path has (a tick mid-frame would
+    // corrupt the wire exactly when the report matters most).
+    hal::without_interrupts(|| {
+        let mut f = FrameBuf::new();
+        let _ = write!(
+            f,
+            r#"{{"id":{},"type":"panic","location":""#,
+            events::next_id()
+        );
+        if let Some(loc) = info.location() {
+            let mut esc = FmtCapture(&mut f);
+            let _ = write!(esc, "{}:{}", loc.file(), loc.line());
+        }
+        let _ = f.write_str(r#"","msg":""#);
+        let mut msg = FmtCapture(&mut f);
+        let _ = write!(msg, "{}", info.message());
+        let _ = f.write_str(r#""}"#);
+        f.emit();
+    });
     hal::shutdown(true)
 }
 

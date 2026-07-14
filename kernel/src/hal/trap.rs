@@ -121,8 +121,9 @@ extern "C" fn __kernai_trap(frame: &mut TrapFrame) {
 /// `cycle` counter is illegal by the privileged spec, and its encoding
 /// decodes into meaningful fields for the fault report.
 pub fn trigger_illegal_instruction() -> ! {
-    // SAFETY: this instruction never retires — it raises illegal-instruction
-    // immediately; the trap handler emits the fault report and shuts down.
-    unsafe { core::arch::asm!(".word 0xc0001073", options(nomem, nostack)) };
-    unreachable!("illegal instruction fell through");
+    // SAFETY: this instruction never retires — it always raises
+    // illegal-instruction; the trap handler emits the fault report and shuts
+    // down. options(noreturn) states that contract, and omitting `nomem`
+    // keeps the handler's memory effects visible to the compiler.
+    unsafe { core::arch::asm!(".word 0xc0001073", options(noreturn)) };
 }

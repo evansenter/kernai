@@ -10,8 +10,9 @@ fault reports). See `docs/HANDOFF.md` for the exact next step.
 ## Bootstrap (Ubuntu 24.04 or similar)
 
 ```sh
-# 1. QEMU with RISC-V system emulation (bundles OpenSBI) + cross gdb
-sudo apt-get install -y qemu-system-misc gdb-multiarch python3 make
+# 1. QEMU with RISC-V system emulation (bundles OpenSBI), cross gdb, and a
+#    host C toolchain (rustc needs `cc` to link build scripts)
+sudo apt-get install -y qemu-system-misc gdb-multiarch python3 make gcc curl
 
 # 2. Rust via rustup (https://rustup.rs). The pinned nightly + riscv target
 #    are declared in rust-toolchain.toml; this installs them:

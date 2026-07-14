@@ -11,6 +11,8 @@ pipe with kernel-determined chunking. It proves the framing + read machinery
 end to end before any kernel exists.
 """
 
+from __future__ import annotations  # keeps `bytes | None` legal on py3.9
+
 import os
 import selectors
 import subprocess

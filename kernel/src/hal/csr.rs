@@ -69,6 +69,8 @@ pub fn without_interrupts<T>(f: impl FnOnce() -> T) -> T {
 /// Park until an interrupt is pending (the idle loop's heartbeat).
 pub fn wait_for_interrupt() {
     // SAFETY: wfi stalls the hart until an interrupt pends, then execution
-    // continues normally; no memory access, no register effects.
-    unsafe { asm!("wfi", options(nomem, nostack)) };
+    // continues normally. The trap handler that runs during the park mutates
+    // kernel state, so no `nomem` — like the other interrupt asm here, this
+    // must be a compiler barrier so those effects are visible to the caller.
+    unsafe { asm!("wfi", options(nostack)) };
 }

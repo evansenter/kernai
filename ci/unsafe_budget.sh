@@ -38,14 +38,25 @@ failures = []
 
 
 def strip_comments_and_strings(src: str) -> str:
-    """Blank out comments, string literals, and char literals, preserving
-    newlines and brace structure so line numbers and block extents survive."""
+    """Blank out comments, string literals (incl. raw/byte strings), and
+    char literals, preserving newlines and brace structure so line numbers
+    and block extents survive. Raw strings matter: r#"..."# has no escapes,
+    and mishandling one would desync the scanner and blank out real code —
+    an attacker's path to hiding `unsafe`."""
     out = []
     i, n = 0, len(src)
     while i < n:
         c = src[i]
         two = src[i:i + 2]
-        if two == "//":
+        raw = re.match(r'b?r(#*)"', src[i:])
+        if raw and (i == 0 or not (src[i - 1].isalnum() or src[i - 1] == "_")):
+            # Raw (byte) string: contents end at `"` + same number of `#`;
+            # backslashes are literal, never escapes.
+            close = src.find('"' + raw.group(1), i + raw.end())
+            end = n if close == -1 else close + 1 + len(raw.group(1))
+            out.append("".join(ch if ch == "\n" else " " for ch in src[i:end]))
+            i = end
+        elif two == "//":
             j = src.find("\n", i)
             j = n if j == -1 else j
             out.append(" " * (j - i))
@@ -155,11 +166,13 @@ for path in sorted(pathlib.Path("kernel/src").rglob("*.rs")):
         total_unsafe_lines += sum(e - s + 1 for s, e in merged)
 
     if not in_hal:
+        # Match against `clean`, not `raw`: the attribute inside a comment or
+        # string is not seen by rustc and must not satisfy this check.
         is_crate_root = path.name in ("main.rs", "lib.rs") and path.parent.name == "src"
-        wanted = ("#![forbid(unsafe_code)]", "#![deny(unsafe_code)]") if is_crate_root \
-            else ("#![forbid(unsafe_code)]",)
-        if not any(w in raw for w in wanted):
-            failures.append(f"{path}: missing {' or '.join(wanted)}")
+        lints = "forbid|deny" if is_crate_root else "forbid"
+        if not re.search(rf"^\s*#!\[({lints})\(unsafe_code\)\]", clean, re.M):
+            want = "#![forbid(unsafe_code)]" + (" or #![deny(unsafe_code)]" if is_crate_root else "")
+            failures.append(f"{path}: missing {want} (as a real attribute, not a comment)")
 
 if len(unsafe_files) > MAX_UNSAFE_FILES:
     failures.append(

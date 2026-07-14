@@ -64,14 +64,16 @@ interrupted code can be resumed exactly as it was (`kernel/src/hal/trap.rs`
 Our handler services the timer, records the trap, and emits:
 
 ```json
-{"id": 3, "type": "tick", "seq": 3, "time": 248217}
+{"id": 3, "type": "tick", "seq": 3, "time": 248228}
 ```
 
 Two things worth staring at:
 
 - **`time` is not wall-clock time.** QEMU runs with `-icount`, which derives
-  the virtual clock from *how many instructions have executed*. Ticks fire
-  every 500,000 instructions, exactly. Run it twice, get identical numbers —
+  the virtual clock from *how many instructions have executed*. The kernel
+  re-arms each tick from the previous deadline, so ticks land exactly 10,000
+  timebase units — 500,000 instructions — apart. Run it twice, get identical
+  numbers —
   `make test` literally asserts two boots produce byte-identical streams.
   (Principle P9: agents debug by re-running, so nothing may be random.)
 - **`id` increases across all event types.** The event stream is the
@@ -83,8 +85,8 @@ The kernel keeps its last 8 traps in a ring buffer, and you can ask for it
 at any time by sending one byte, `r`, over the serial port:
 
 ```json
-{"id": 5, "type": "trap_ring", "count": 4, "entries": [
-  {"id": 1, "cause": "timer", "sepc": "0x8020020e"},
+{"id": 6, "type": "trap_ring", "count": 5, "entries": [
+  {"id": 1, "cause": "timer", "sepc": "0x80200232"},
   ...
 ]}
 ```
@@ -103,12 +105,12 @@ Instead of hanging or dumping hex, the handler emits the project's first
 **diagnostic frame** (principle P6: *errors are prompts*):
 
 ```json
-{"id": 7, "type": "fault",
+{"id": 8, "type": "fault",
  "cause": "0x2", "cause_name": "illegal_instruction",
- "sepc": "0x80200aa2",          // address of the guilty instruction
+ "sepc": "0x80200568",          // address of the guilty instruction
  "stval": "0xc0001073",         // its raw bits, straight from the CPU
- "ra": "0x80200528",            // where it was called from
- "sp": "0x802122a0",            // the stack pointer at that moment
+ "ra": "0x8020045c",            // where it was called from
+ "sp": "0x80211b40",            // the stack pointer at that moment
  "insn": {                      // the bits, decoded for you:
    "bits": "0xc0001073",
    "opcode": "0x73",            //   a SYSTEM instruction

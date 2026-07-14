@@ -69,6 +69,18 @@ static RING: [RingSlot; RING_SIZE] = [const { RingSlot::new() }; RING_SIZE];
 static RING_COUNT: AtomicU64 = AtomicU64::new(0);
 /// Timer ticks serviced so far.
 static TICKS: AtomicU64 = AtomicU64::new(0);
+/// The timebase value the current tick was scheduled for. Re-arming from
+/// this (not from "now") keeps ticks exactly TICK_INTERVAL apart — no
+/// handler-latency drift in the cadence.
+static NEXT_DEADLINE: AtomicU64 = AtomicU64::new(0);
+
+/// Schedule the first tick. Call once from kmain, before enabling
+/// interrupts.
+pub fn arm_first_tick() {
+    let deadline = hal::read_time() + TICK_INTERVAL;
+    NEXT_DEADLINE.store(deadline, Ordering::Relaxed);
+    hal::set_timer(deadline);
+}
 
 fn ring_record(id: u64, scause: u64, sepc: u64, stval: u64) {
     let n = RING_COUNT.load(Ordering::Relaxed);
@@ -90,8 +102,17 @@ pub fn handle(frame: &mut TrapFrame) {
     ring_record(id, scause, frame.sepc, stval);
 
     if scause == CAUSE_S_TIMER {
-        // Re-arm first: set_timer clears the pending bit before we sret.
-        hal::set_timer(hal::read_time() + TICK_INTERVAL);
+        // Re-arm first (set_timer clears the pending bit before we sret),
+        // from the previous deadline so the cadence stays exact. Clamp
+        // forward if we ever fall a whole interval behind — no catch-up
+        // storm of back-to-back ticks.
+        let now = hal::read_time();
+        let mut next = NEXT_DEADLINE.load(Ordering::Relaxed) + TICK_INTERVAL;
+        if next <= now {
+            next = now + TICK_INTERVAL;
+        }
+        NEXT_DEADLINE.store(next, Ordering::Relaxed);
+        hal::set_timer(next);
         let seq = TICKS.fetch_add(1, Ordering::Relaxed) + 1;
         let mut f = FrameBuf::new();
         let _ = write!(
