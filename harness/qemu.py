@@ -20,7 +20,19 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 KERNEL_ELF = REPO_ROOT / "kernel/target/riscv64gc-unknown-none-elf/release/kernai"
 
 
-def qemu_args(kernel_elf=KERNEL_ELF, gdb=False):
+def qemu_args(kernel_elf=KERNEL_ELF, gdb=False, record=None, replay=None):
+    # -icount is the base determinism flag (P9). For deterministic replay of
+    # operator INPUT (E6/M7), QEMU's record/replay logs every non-deterministic
+    # input (serial bytes, timer reads) to `rrfile` in record mode and re-feeds
+    # them at the identical instruction count in replay mode. rr drives the
+    # main loop itself and does not coexist with sleep=off (which hangs it), so
+    # sleep=off (run-as-fast-as-possible) is only used outside record/replay.
+    if record:
+        icount = f"shift=1,rr=record,rrfile={record}"
+    elif replay:
+        icount = f"shift=1,rr=replay,rrfile={replay}"
+    else:
+        icount = "shift=1,sleep=off"
     args = [
         "qemu-system-riscv64",
         "-machine", "virt",
@@ -30,7 +42,7 @@ def qemu_args(kernel_elf=KERNEL_ELF, gdb=False):
         "-display", "none",
         "-monitor", "none",
         "-serial", "stdio",
-        "-icount", "shift=1,sleep=off",  # P9: deterministic virtual time
+        "-icount", icount,
         "-rtc", "clock=vm",              # RTC follows virtual time too
         "-no-reboot",
         "-kernel", str(kernel_elf),
@@ -43,10 +55,10 @@ def qemu_args(kernel_elf=KERNEL_ELF, gdb=False):
 class QemuKernel:
     """Boot the kernel for an acceptance check: read events, send bytes."""
 
-    def __init__(self, kernel_elf=KERNEL_ELF):
+    def __init__(self, kernel_elf=KERNEL_ELF, record=None, replay=None):
         self._stderr = tempfile.TemporaryFile()
         self._proc = subprocess.Popen(
-            qemu_args(kernel_elf),
+            qemu_args(kernel_elf, record=record, replay=replay),
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=self._stderr,

@@ -309,3 +309,22 @@ this used the kernel as a deputy). Fixed: translate_checked requires the leaf
 to be user-accessible (U) plus the needed R/W bits before the kernel
 dereferences a user pointer. The `leaker` fixture (write() of 0x80200000)
 regression-tests it: the write is refused (EFAULT), no bytes leak.
+
+**2026-07-14 · M7 · Deterministic input replay uses QEMU's built-in record/replay, not a kernel `input` event or gdb-driven injection.**
+The HANDOFF speculated M7 would need the kernel to echo an `input` event and
+the harness to quantize input delivery to instruction boundaries (or drive
+input via the gdb stub) so replays line up. QEMU's `-icount rr=record` already
+solves exactly this: it logs every non-deterministic input — serial bytes and
+timer reads — with the instruction count at which the guest consumed it, and
+`rr=replay` re-injects each at the identical instruction. So M7 needs **zero**
+kernel change: record a live operator session to an `rrfile`, then replay with
+no live input and assert the raw event frames are byte-identical. Two gotchas,
+both logged in `harness/qemu.py`: (1) `sleep=off` (run-as-fast-as-possible)
+hangs the rr main loop — rr drives the loop itself, so it is used only outside
+record/replay; (2) a byte sent before the guest is up is dropped in record
+mode, so the harness waits for the boot `hello` frame before driving input.
+The recorded session drives all four suites (p/m/i/f) then crashes (x),
+exercising input at four widely-separated instruction counts; replay reproduces
+every frame bit-for-bit. This keeps the serial layer dumb (no echo) and the
+kernel unchanged — determinism is a property of the QEMU invocation (P9), where
+it belongs.

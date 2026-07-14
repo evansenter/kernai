@@ -1,4 +1,4 @@
-# Architecture (current: M6)
+# Architecture (current: M7)
 
 One page, always accurate. Principles P1–P12 are defined in
 `RFC-001-agent-native-kernel.md`. Beginner-level narrative: `WALKTHROUGH.md`.
@@ -96,6 +96,12 @@ next. Queue drains → `suite_done` → `idle`.
   (a full-frame trampoline) resumes it. snapshot returns a positive id in the
   original and 0 in each continuation (fork()-style). `resume_user` is also
   the suspend/resume primitive real scheduling will use.
-- **P9/E6 (M7, next)**: extend the byte-identical determinism guarantee to
-  recorded *operator input*, with a replay mode that re-feeds a session and
-  diffs the event stream. Mostly harness work + an `input` event.
+- **P9/E6 (M7, done)**: the byte-identical determinism guarantee now covers
+  recorded *operator input*, via QEMU's own record/replay (`-icount
+  rr=record/replay`, `harness/qemu.py`). A live session (all four suites, then
+  the crash) is logged to an `rrfile`; replaying with no live input reproduces
+  every event frame bit-for-bit (`runner.py::m7`). No kernel change — QEMU logs
+  each input at the instruction count it was consumed and re-injects it there.
+- **P4 attachment stays open (M8, next)**: MCP/JSON-RPC over the same frames;
+  command bytes become request verbs, `trap_ring` + process table become
+  resources.

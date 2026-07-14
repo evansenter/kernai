@@ -4,6 +4,7 @@ Each milestone check is a function returning None on success and raising
 AssertionError (with a readable message) on failure. `make test` runs `all`.
 """
 
+import json
 import subprocess
 import sys
 import time
@@ -366,6 +367,75 @@ def hardening_garbage_input():
         assert ring["count"] >= 200, f"ring lost traps: {ring}"
         ids = [e["id"] for e in seen]
         assert ids == sorted(set(ids)), "event ids not strictly monotonic under noise"
+
+
+@milestone("m7")
+def m7_deterministic_replay():
+    """Deterministic replay of a full operator session (E6). Record a session
+    that drives real input (run the payload + checkpoint suites, then crash
+    the kernel to shut down) into QEMU's record/replay log; replay it with NO
+    live input; the two event streams must be byte-identical — every operator
+    input re-fed at the identical instruction count (P9)."""
+    import tempfile
+
+    from .qemu import QemuKernel
+
+    def drain(q):
+        frames = []
+        while True:
+            try:
+                f = q.stream.next_frame(timeout=60)
+            except TimeoutError as e:
+                raise AssertionError(f"QEMU did not reach EOF: {e}") from e
+            if f is None:
+                return frames
+            frames.append(f)
+
+    # Drive every payload suite in turn, then crash. Advancing on each
+    # `suite_done` feeds operator input at four distinct, widely-separated
+    # instruction counts (not just one), so the replay proves QEMU re-injects
+    # each recorded byte at its exact recorded instant.
+    script = [b"p", b"m", b"i", b"f"]
+
+    with tempfile.NamedTemporaryFile(suffix=".rr") as rr:
+        # Record RAW frames (bit comparison, no JSON round-trip). Wait for the
+        # boot frame before driving input — a byte sent before the guest is
+        # up is dropped in record mode. Send the next suite command on each
+        # `suite_done`; after the last suite, crash with 'x' → SBI shutdown →
+        # QEMU exits. rr runs throttled to virtual time (no sleep=off); the
+        # session is short so this is sub-second.
+        with QemuKernel(record=rr.name) as q:
+            recorded = []
+            hello = q.stream.next_frame(timeout=60)
+            assert hello is not None and json.loads(hello)["type"] == "hello", "record: bad boot"
+            recorded.append(hello)
+            step = 0
+            q.send(script[step])
+            while True:
+                f = q.stream.next_frame(timeout=60)
+                if f is None:
+                    break
+                recorded.append(f)
+                if json.loads(f).get("type") == "suite_done":
+                    step += 1
+                    q.send(script[step] if step < len(script) else b"x")
+
+        # Replay: no live input; QEMU re-feeds the recorded bytes at the same
+        # instruction counts.
+        with QemuKernel(replay=rr.name) as q:
+            replayed = drain(q)
+
+    assert len(recorded) > 20, f"recorded session too short: {len(recorded)} frames"
+    # Sanity: the recorded session actually exercised operator input (the 'p'
+    # payload suite ran and the 'x' crash shut the kernel down).
+    types = {json.loads(f)["type"] for f in recorded}
+    assert {"payload_start", "payload_exit", "fault"} <= types, \
+        f"recorded session didn't exercise the input script: {sorted(types)}"
+    assert recorded == replayed, (
+        f"replay diverged: {len(recorded)} recorded vs {len(replayed)} replayed frames; "
+        "first mismatch at "
+        + next((str(i) for i, (a, b) in enumerate(zip(recorded, replayed)) if a != b), "tail")
+    )
 
 
 @milestone("determinism")

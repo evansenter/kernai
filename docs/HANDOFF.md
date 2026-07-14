@@ -5,8 +5,8 @@ beyond this repo (we dogfood E3 on ourselves).
 
 ## Current state (2026-07-14, session 2)
 
-**M0–M6 complete and green.** `make test` from a fresh clone runs ten
-checks in a few seconds:
+**M0–M7 complete and green.** `make test` from a fresh clone runs eleven
+checks in ~5 seconds (fmt + clippy + build + unsafe budget first):
 
 1. `m0` — framing round-trips over a real pipe (loopback stub)
 2. `m1` — boot to hello frame over the SBI console (RFC acceptance 1)
@@ -26,8 +26,13 @@ checks in a few seconds:
    mid-run; the kernel forks that checkpoint into independent continuations
    that each resume from the checkpoint point, not the top
 8. `hardening` — 200 ticks contiguous under garbage serial input
-9. `determinism` — two input-free boots byte-identical (P9 / E6 seed)
-10. `demo` — the narrated `make demo` completes
+9. `m7` — deterministic replay of a full operator session (E6): record a
+   live session (all four suites p/m/i/f, then the `x` crash) to a QEMU
+   record/replay log; replay it with NO live input; the two raw event
+   streams are byte-identical (every serial byte re-injected at its exact
+   recorded instruction count)
+10. `determinism` — two input-free boots byte-identical (P9 / E6 seed)
+11. `demo` — the narrated `make demo` completes
 
 CI (`.github/workflows/ci.yml`) runs the same gate + `ci/unsafe_budget.sh`
 on every push. **Unsafe budget: 55/200 lines in 4/4 hal files** — the file
@@ -36,10 +41,11 @@ cap is fully used; new hal code must extend `hal/csr.rs` / `hal/boot.rs` /
 
 Audits so far: M3+M4 (five reviewers) fixed one HIGH (`sscratch` desync) +
 LOWs. M5 paging (five reviewers) fixed one HIGH (a confused-deputy leak in
-the write syscall — the kernel would follow a payload's kernel pointer) and
-one LOW (register scrub), both in the M6 commit. **M6 (checkpoint) is new and
-not yet audited** — the deep-copy walk, __resume_user frame layout, and
-snapshot/reap lifecycle are the spots to scrutinize next.
+the write syscall) and one LOW (register scrub), both in the M6 commit. M6
+(checkpoint) — adversarial audit came back **clean** (deep-copy independence
+across 40 runs, no cross-continuation frame sharing, register scrub holds,
+confused-deputy holds against a 12-address battery, graceful exhaustion).
+M7 is harness-only (QEMU record/replay); no new unsafe, nothing to audit.
 
 Toolchain: nightly-2026-07-14 (rust-toolchain.toml), QEMU 8.2.2
 (`qemu-system-misc`), gdb-multiarch 15.1. `make build` builds the payload
@@ -56,8 +62,8 @@ workspace first (the kernel embeds their ELFs), then the kernel.
 - Nothing known-broken.
 - Payloads still run sequentially (run-to-completion); `yield` is a no-op
   reschedule and `spawn`'d children run after the parent. The full-frame
-  suspend/resume switch now EXISTS (`hal::resume_user`, used by M6 restore),
-  so real cooperative/preemptive scheduling is a small follow-up: save the
+  suspend/resume switch EXISTS (`hal::resume_user`, used by M6 restore), so
+  real cooperative/preemptive scheduling is a small follow-up: save the
   running payload's frame on yield/preempt and resume another slot. Not wired
   yet because no milestone required it.
 - Deadlines are in timebase units (deterministic instruction proxy under
@@ -67,24 +73,35 @@ workspace first (the kernel embeds their ELFs), then the kernel.
 
 ## Exact next step
 
-**M7: deterministic replay green in CI (E6).** Per the RFC ladder. The kernel
-is already deterministic under -icount (the `determinism` check proves two
-input-free boots are byte-identical). M7 extends that to *operator input*:
+**M8: MCP control plane + resources (P4).** Per the RFC ladder. Today the
+control plane is single command bytes in / JSON event frames out. M8 makes the
+inbound side structured too — JSON-RPC (MCP shape) rides *inside* the existing
+length-prefixed frames, so the serial layer stays dumb (P-serial rule holds).
 
-1. Record: every control-plane input (the command bytes r/x/p/m/i/f, and
-   later MCP requests) is logged with the icount/timebase at which it was
-   consumed. The harness already sends these; capture them host-side with the
-   guest's `time` for each, or have the kernel echo an `input` event.
-2. Replay mode: a harness runner that re-feeds the recorded inputs and
-   asserts the event stream is byte-identical to the recording — including
-   the payload suites (which today aren't in the determinism check because
-   command timing is host-paced). The subtlety: input delivery must be tied
-   to instruction count, not wall clock, so replays line up. Options: drive
-   input at deterministic icount points via the gdb stub, or make the kernel
-   poll input only at fixed tick boundaries so delivery is quantized.
-3. Acceptance (E6): record a full session (e.g. boot + `f` suite), replay it,
-   diff the two event streams — must be identical. Add to `make test`.
+Plan:
+1. Inbound frames: the harness sends length-prefixed JSON-RPC requests instead
+   of bare bytes. The kernel grows a tiny request reader on the serial input
+   path (parse a frame, dispatch a method). Keep the single-byte commands
+   working as a fallback so `make demo` and the existing checks don't break, or
+   migrate them — decide and log in DECISIONS.md.
+2. Methods map to today's verbs: `tools/call run_suite{p|m|i|f}`, `crash`,
+   `ring/read`. Responses carry a request id so calls correlate (P12 parent id
+   is the seed for this).
+3. Resources (MCP `resources/*`): expose `trap_ring` and the process table as
+   readable resources — `resources/read trap_ring` returns the ring, the
+   process table lists live payloads + caps. This is the natural home for the
+   snapshot handles M6 deferred (snapshot/restore/fork become control-plane
+   verbs returning resource handles).
+4. Acceptance: a harness check that drives the kernel purely over JSON-RPC —
+   call a tool, read a resource, assert the structured response. Add to
+   `make test`. Keep it deterministic (goes through the same `qemu.py`).
 
-This is mostly harness work + a small kernel `input` event; no new unsafe.
-Before starting: **M6 deserves a dedicated adversarial audit** (deep-copy
-walk, __resume_user, snapshot/reap lifecycle) — do that first.
+No new unsafe expected — this is a parser + dispatcher in safe kernel code plus
+harness work. A JSON parser in `no_std` with no alloc is the one real cost:
+either a tiny hand-rolled scanner for the fixed request shapes (recommended —
+the request grammar is small and fixed) or a `serde`/`nanoserde` no_std path.
+Log the choice in DECISIONS.md.
+
+After M8: M9 (rich diagnostic frames + the `surface-classic` printf twin for
+the E1 A/B), M10 (delegation/attenuation hardening), M11 (autonomy dial), M12
+(the E1–E8 eval suite). Then expand past the ladder per the RFC's spirit.
