@@ -22,6 +22,16 @@ pub const TICK_INTERVAL: u64 = 10_000;
 const INTERRUPT_BIT: u64 = 1 << 63;
 const CAUSE_S_TIMER: u64 = INTERRUPT_BIT | 5;
 const CAUSE_ILLEGAL_INSTRUCTION: u64 = 2;
+const CAUSE_U_ECALL: u64 = 8; // environment call from U-mode
+
+const SSTATUS_SPP: u64 = 1 << 8; // previous privilege: 0 = U, 1 = S
+const SSTATUS_SPIE: u64 = 1 << 5; // previous interrupt-enable
+
+// Register indices into TrapFrame::regs (regs[i] holds x(i+1)).
+const X_SP: usize = 1; // x2
+const X_A0: usize = 9; // x10
+const X_A1: usize = 10; // x11
+const X_A7: usize = 16; // x17
 
 /// Saved by hal's trap vector; layout is matched by its asm (offsets
 /// (n-1)*8 for x_n, 248 for sepc, 256 for sstatus). Plain data on purpose:
@@ -37,6 +47,35 @@ pub struct TrapFrame {
 impl TrapFrame {
     fn x(&self, n: usize) -> u64 {
         if n == 0 { 0 } else { self.regs[n - 1] }
+    }
+
+    pub fn a0(&self) -> u64 {
+        self.regs[X_A0]
+    }
+    pub fn a1(&self) -> u64 {
+        self.regs[X_A1]
+    }
+    pub fn a7(&self) -> u64 {
+        self.regs[X_A7]
+    }
+    pub fn set_a0(&mut self, v: u64) {
+        self.regs[X_A0] = v;
+    }
+    fn set_sp(&mut self, v: u64) {
+        self.regs[X_SP] = v;
+    }
+
+    /// True if this trap came from U-mode (a payload), false if from S-mode
+    /// (the kernel itself). Drives fault routing: payload faults kill the
+    /// payload; kernel faults shut down.
+    pub fn is_from_user(&self) -> bool {
+        self.sstatus & SSTATUS_SPP == 0
+    }
+
+    /// Step past the 4-byte `ecall` so the payload resumes after it. Our sys
+    /// runtime always emits an uncompressed `ecall`, so the width is fixed.
+    fn advance_past_ecall(&mut self) {
+        self.sepc = self.sepc.wrapping_add(4);
     }
 }
 
@@ -121,10 +160,47 @@ pub fn handle(frame: &mut TrapFrame) {
             hal::read_time()
         );
         f.emit();
+        // M4 seam: a running payload's instruction-count deadline is checked
+        // here; an over-budget payload is redirected to the scheduler
+        // (crate::payload::on_tick returns whether it killed the current one).
+        if crate::payload::on_tick() {
+            redirect_to_scheduler(frame);
+        }
+        return;
+    }
+
+    // Environment call from a payload: dispatch the syscall.
+    if scause == CAUSE_U_ECALL {
+        frame.advance_past_ecall();
+        match crate::syscall::dispatch(frame) {
+            crate::syscall::Outcome::Resume(v) => frame.set_a0(v as u64),
+            crate::syscall::Outcome::Leave => redirect_to_scheduler(frame),
+        }
+        return;
+    }
+
+    // Any other trap is a fault. From U-mode it kills only the payload and
+    // the kernel keeps running (P1: a parked payload is an event, not a
+    // kernel error); from S-mode it is a kernel bug — report and shut down.
+    if frame.is_from_user() {
+        emit_fault(frame, id, scause, stval, crate::payload::current_pid());
+        crate::payload::mark_faulted();
+        redirect_to_scheduler(frame);
     } else {
-        emit_fault(frame, id, scause, stval);
+        emit_fault(frame, id, scause, stval, None);
         hal::shutdown(true);
     }
+}
+
+/// Rewrite `frame` so the trap-return `sret` lands in the scheduler in
+/// S-mode on the boot stack, abandoning the departing payload. This is how
+/// a payload hands the CPU back to the kernel without a separate context
+/// switch: the normal trap-restore path does the work.
+fn redirect_to_scheduler(frame: &mut TrapFrame) {
+    frame.sepc = (crate::payload::scheduler_resume as *const () as usize) as u64;
+    frame.sstatus |= SSTATUS_SPP; // return to S-mode
+    frame.sstatus |= SSTATUS_SPIE; // interrupts on after sret
+    frame.set_sp(hal::boot_stack_top() as u64);
 }
 
 fn cause_name(scause: u64) -> &'static str {
@@ -190,11 +266,26 @@ pub fn emit_ring_dump() {
 /// The v0 diagnostic frame (P6): everything we know about the fault,
 /// structured. M9 grows this into the full frame (page-table walk, richer
 /// register file, causal parent), same event shape.
-fn emit_fault(frame: &TrapFrame, id: u64, scause: u64, stval: u64) {
+///
+/// `pid` is `Some` for a payload fault (origin "payload", kernel survives)
+/// and `None` for a kernel fault (origin "kernel", shutdown follows). The
+/// frame shape is identical either way — an operator diagnoses both the same.
+fn emit_fault(frame: &TrapFrame, id: u64, scause: u64, stval: u64, pid: Option<usize>) {
     let mut f = FrameBuf::new();
+    match pid {
+        Some(pid) => {
+            let _ = write!(
+                f,
+                r#"{{"id":{id},"type":"fault","origin":"payload","pid":{pid},"#
+            );
+        }
+        None => {
+            let _ = write!(f, r#"{{"id":{id},"type":"fault","origin":"kernel","#);
+        }
+    }
     let _ = write!(
         f,
-        r#"{{"id":{id},"type":"fault","cause":"0x{scause:x}","cause_name":"{}","sepc":"0x{:x}","stval":"0x{stval:x}","ra":"0x{:x}","sp":"0x{:x}","insn":"#,
+        r#""cause":"0x{scause:x}","cause_name":"{}","sepc":"0x{:x}","stval":"0x{stval:x}","ra":"0x{:x}","sp":"0x{:x}","insn":"#,
         cause_name(scause),
         frame.sepc,
         frame.x(1),

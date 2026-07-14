@@ -112,6 +112,51 @@ def m2_traps_timer_fault():
             raise AssertionError("kernel hung after fault report instead of shutting down")
 
 
+@milestone("m3")
+def m3_user_payloads():
+    """A U-mode payload runs to sys_exit; its output arrives tagged untrusted;
+    a payload fault yields a structured report and kills only the payload —
+    the kernel survives and keeps answering."""
+    from .qemu import QemuKernel
+    with QemuKernel() as q:
+        seen = []
+        _await(q, "hello", seen)
+        q.send(b"p")  # operator triggers the payload suite
+
+        start = _await(q, "payload_start", seen)
+        assert start["name"] == "hello", f"first payload not hello: {start}"
+        assert start["caps"] == ["write"], f"unexpected caps: {start}"
+        assert int(start["entry"], 16) >= 0x8040_0000, f"entry not in arena: {start}"
+
+        out = _await(q, "payload_output", seen)
+        assert out["pid"] == start["pid"], f"output pid mismatch: {out}"
+        assert out["untrusted"] is True, f"payload output must be tagged untrusted: {out}"
+        assert out["data"] == "hello from userspace", f"wrong output: {out}"
+
+        ex = _await(q, "payload_exit", seen)
+        assert ex["pid"] == start["pid"] and ex["code"] == 0, f"bad exit: {ex}"
+
+        # Second payload deliberately faults (S-mode CSR write from U-mode).
+        cstart = _await(q, "payload_start", seen)
+        assert cstart["name"] == "crasher", f"second payload not crasher: {cstart}"
+        fault = _await(q, "fault", seen)
+        assert fault["origin"] == "payload", f"fault not attributed to payload: {fault}"
+        assert fault["pid"] == cstart["pid"], f"fault pid mismatch: {fault}"
+        assert fault["cause_name"] == "illegal_instruction", f"wrong cause: {fault}"
+        assert fault["insn"]["csr"] == "0x100", f"expected sstatus (0x100) in decode: {fault}"
+
+        done = _await(q, "suite_done", seen)
+        assert done["exited"] == 1 and done["faulted"] == 1, f"unexpected suite result: {done}"
+
+        # The kernel must still be alive after a payload crash: it answers.
+        q.send(b"r")
+        ring = _await(q, "trap_ring", seen)
+        assert ring["count"] >= 4, f"kernel unresponsive after payload fault: {ring}"
+
+        ids = [e["id"] for e in seen]
+        assert ids == sorted(set(ids)), f"event ids not strictly monotonic: {ids}"
+
+
 @milestone("hardening")
 def hardening_garbage_input():
     """Garbage serial bytes are ignored; the ring query still answers; 200

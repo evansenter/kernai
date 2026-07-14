@@ -1,24 +1,36 @@
 //! Supervisor trap vector: full trap-frame save/restore around a call into
-//! the safe handler (`crate::traps::handle`).
+//! the safe handler (`crate::traps::handle`), for traps arriving from both
+//! S-mode (kernel) and U-mode (payloads).
 //!
-//! M3 seam: traps currently only arrive from S-mode (no U-mode yet), so the
-//! vector stays on the kernel stack. U-mode entry will add an
-//! sscratch-based stack swap here — this file, no new unsafe files.
+//! sscratch convention: 0 while the kernel runs (trap keeps the current
+//! kernel sp); the kernel trap-stack top while a payload runs (trap swaps
+//! onto it). The Rust shim re-arms sscratch on every return according to
+//! the privilege the frame resumes into (sstatus.SPP).
 
 use core::arch::global_asm;
 
-use super::csr;
+use super::{boot, csr};
 use crate::traps::TrapFrame;
+
+const SSTATUS_SPP: u64 = 1 << 8;
+const SSTATUS_SPIE: u64 = 1 << 5;
 
 // Layout must match crate::traps::TrapFrame exactly:
 //   regs[31] (x1..x31 at offset (n-1)*8) | sepc @ 248 | sstatus @ 256.
-// 272 = 264 rounded up to keep sp 16-aligned.
+// 272 = 264 rounded up to keep sp 16-aligned. Unlike pre-M3, sp (x2) is
+// restored FROM THE FRAME (last load), so the handler can redirect the
+// resumed context (kill a payload, re-enter the idle loop) by rewriting
+// frame.{sepc, regs[1], sstatus}.
 global_asm!(
     r#"
     .section .text
     .align 4
     .globl __trap_vector
 __trap_vector:
+    csrrw sp, sscratch, sp      // swap: from U -> sp = trap stack, sscratch = user sp
+    bnez  sp, 1f                // nonzero => trap from U-mode
+    csrrw sp, sscratch, sp      // from S: undo (sscratch back to 0, sp restored)
+1:
     addi sp, sp, -272
     sd   x1,   0(sp)
     sd   x3,  16(sp)
@@ -50,8 +62,11 @@ __trap_vector:
     sd   x29, 224(sp)
     sd   x30, 232(sp)
     sd   x31, 240(sp)
-    addi t0, sp, 272            // t0 (x5) already saved: reuse for pre-trap sp
-    sd   t0, 8(sp)
+    csrr t1, sscratch           // from U: interrupted user sp; from S: 0
+    bnez t1, 2f
+    addi t1, sp, 272            // from S: pre-trap kernel sp
+2:  sd   t1, 8(sp)              // x2 slot
+    csrw sscratch, zero         // we are in the kernel now: S-mode convention
     csrr t0, sepc
     sd   t0, 248(sp)
     csrr t0, sstatus
@@ -92,7 +107,7 @@ __trap_vector:
     ld   x29, 224(sp)
     ld   x30, 232(sp)
     ld   x31, 240(sp)
-    addi sp, sp, 272            // x2 restored arithmetically, not from the frame
+    ld   sp,   8(sp)            // x2 from the frame, last — enables redirects
     sret
     "#
 );
@@ -103,8 +118,10 @@ unsafe extern "C" {
     fn __trap_vector();
 }
 
-/// Point stvec at the trap vector. Must run before interrupts are enabled.
+/// Point stvec at the trap vector and establish the S-mode sscratch
+/// convention. Must run before interrupts are enabled.
 pub fn init() {
+    csr::write_sscratch(0);
     csr::write_stvec(__trap_vector as *const () as usize);
 }
 
@@ -114,6 +131,35 @@ pub fn init() {
 #[unsafe(no_mangle)]
 extern "C" fn __kernai_trap(frame: &mut TrapFrame) {
     crate::traps::handle(frame);
+    // Re-arm sscratch for wherever this frame resumes: trap-stack top if
+    // returning to U-mode (SPP=0), 0 if staying in S-mode.
+    if frame.sstatus & SSTATUS_SPP == 0 {
+        csr::write_sscratch(boot::trap_stack_top());
+    } else {
+        csr::write_sscratch(0);
+    }
+}
+
+/// First entry into a freshly loaded payload: drop to U-mode at `entry`.
+/// The payload's own `_start` sets its stack; registers are not scrubbed
+/// (no kernel secrets exist yet — revisit with M5 isolation).
+pub fn enter_user(entry: usize) -> ! {
+    csr::write_sscratch(boot::trap_stack_top());
+    // SAFETY: sets sepc/sstatus for an sret into U-mode at `entry`, which
+    // the caller (payload loader) has validated to lie in the arena. SPP=0
+    // selects U-mode; SPIE=1 re-enables interrupts on entry. Diverges.
+    unsafe {
+        core::arch::asm!(
+            "csrw sepc, {entry}",
+            "csrc sstatus, {spp}",
+            "csrs sstatus, {spie}",
+            "sret",
+            entry = in(reg) entry,
+            spp = in(reg) SSTATUS_SPP,
+            spie = in(reg) SSTATUS_SPIE,
+            options(noreturn),
+        )
+    }
 }
 
 /// Deliberately execute an illegal instruction (M2 acceptance 3; later the

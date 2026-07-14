@@ -41,6 +41,17 @@ SECTIONS
         __stack_top = .;
     }
 
+    /* Kernel trap stack: traps arriving from U-mode land here (sscratch
+     * points at __trap_stack_top while a payload runs). 16 KiB. */
+    .trapstack (NOLOAD) : ALIGN(16) {
+        . += 16K;
+        __trap_stack_top = .;
+    }
+
+    /* End of everything the kernel image occupies. Boot asserts this stays
+     * below the payload arena at 0x8040_0000 (see src/payload.rs). */
+    __kernel_end = .;
+
     /DISCARD/ : {
         *(.eh_frame .eh_frame_hdr)
     }

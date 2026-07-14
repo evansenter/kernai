@@ -7,9 +7,14 @@
 TARGET     := riscv64gc-unknown-none-elf
 KERNEL_ELF := kernel/target/$(TARGET)/release/kernai
 
-.PHONY: build run debug gdb demo test fmt clippy unsafe-budget clean
+.PHONY: build payloads run debug gdb demo test fmt clippy unsafe-budget clean
 
-build:
+# Payloads build first: the kernel embeds their ELFs via include_bytes!
+# (kernel/build.rs fails loudly if they're missing).
+payloads:
+	cd payloads && cargo build --release
+
+build: payloads
 	cd kernel && cargo build --release
 
 run: build
@@ -31,13 +36,16 @@ test: unsafe-budget fmt clippy build
 
 fmt:
 	cd kernel && cargo fmt --check
+	cd payloads && cargo fmt --all --check
 
-clippy:
+clippy: payloads
 	cd kernel && cargo clippy --release -- -D warnings
+	cd payloads && cargo clippy --release --workspace -- -D warnings
 
 unsafe-budget:
 	ci/unsafe_budget.sh
 
 clean:
 	cd kernel && cargo clean
+	cd payloads && cargo clean
 	rm -rf harness/__pycache__ harness/tests/__pycache__

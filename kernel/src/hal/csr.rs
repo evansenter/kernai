@@ -37,6 +37,15 @@ pub(super) fn write_stvec(addr: usize) {
     unsafe { asm!("csrw stvec, {}", in(reg) addr, options(nomem, nostack)) };
 }
 
+/// Set sscratch: the trap vector's "where is the kernel stack" register.
+/// Convention: while in U-mode it holds the kernel trap-stack top; while in
+/// S-mode it holds 0. Crate-internal — only hal::trap manages it.
+pub(super) fn write_sscratch(value: usize) {
+    // SAFETY: sscratch is a scratch CSR with no side effects; the trap
+    // vector's swap logic is the only consumer. No memory access.
+    unsafe { asm!("csrw sscratch, {}", in(reg) value, options(nomem, nostack)) };
+}
+
 /// Enable supervisor timer interrupts (sie.STIE, then sstatus.SIE).
 /// Call only after the trap vector is installed.
 pub fn enable_timer_interrupts() {

@@ -6,9 +6,12 @@
 // #![forbid(unsafe_code)] itself (enforced by ci/unsafe_budget.sh).
 
 mod console;
+mod elf;
 mod events;
 #[allow(unsafe_code)]
 mod hal;
+mod payload;
+mod syscall;
 mod traps;
 
 use core::fmt::Write;
@@ -17,11 +20,6 @@ use console::FrameBuf;
 
 /// Kernel proper. Called exactly once from hal::boot with a stack and
 /// zeroed .bss. `dtb` is parked until something needs the device tree.
-///
-/// After boot the kernel free-runs timer ticks and serves single-byte
-/// serial commands — the embryo of P1's externalized control plane:
-///   'r' → dump the trap ring (P11 seed)
-///   'x' → deliberately execute an illegal instruction (M2 acceptance 3)
 pub fn kmain(_hartid: usize, _dtb: usize) -> ! {
     let mut f = FrameBuf::new();
     let _ = write!(
@@ -31,14 +29,29 @@ pub fn kmain(_hartid: usize, _dtb: usize) -> ! {
     );
     f.emit();
 
+    payload::assert_arena_clear();
     hal::traps_init();
     traps::arm_first_tick();
     hal::enable_timer_interrupts();
+    idle()
+}
 
+/// The idle command loop — the embryo of P1's externalized control plane.
+/// The kernel free-runs timer ticks here and serves single-byte serial
+/// commands. The scheduler returns here whenever no payload is runnable, so
+/// `idle` must be reachable as a plain `-> !` continuation.
+///   'r' → dump the trap ring (P11 seed)
+///   'x' → deliberately execute a kernel illegal instruction (M2 accept. 3)
+///   'p' → run the U-mode payload suite (M3/M4)
+pub fn idle() -> ! {
     loop {
         match hal::console_getchar() {
             Some(b'r') => traps::emit_ring_dump(),
             Some(b'x') => hal::trigger_illegal_instruction(),
+            Some(b'p') => {
+                payload::seed_suite();
+                payload::run(); // diverges; returns here via the scheduler
+            }
             _ => hal::wait_for_interrupt(), // park until the next tick
         }
     }

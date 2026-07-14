@@ -49,6 +49,25 @@ impl FrameBuf {
         Ok(())
     }
 
+    /// Write arbitrary bytes as JSON string *content*. Payload output is not
+    /// guaranteed UTF-8 and is untrusted (P7): every byte outside printable
+    /// ASCII (and the two JSON metacharacters) becomes `\u00XX`, so payload
+    /// bytes can never break out of the string or be read as structure.
+    pub fn write_json_escaped_bytes(&mut self, bytes: &[u8]) -> fmt::Result {
+        for &b in bytes {
+            match b {
+                b'"' => self.write_str("\\\"")?,
+                b'\\' => self.write_str("\\\\")?,
+                0x20..=0x7e => {
+                    // single printable-ASCII byte is always valid UTF-8
+                    self.write_str(core::str::from_utf8(&[b]).unwrap_or("?"))?;
+                }
+                _ => write!(self, "\\u{b:04x}")?,
+            }
+        }
+        Ok(())
+    }
+
     /// Send the frame over the serial link. A poisoned (overflowed) buffer
     /// emits nothing — the absence is the signal.
     pub fn emit(&self) {
