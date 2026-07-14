@@ -1,76 +1,81 @@
-# Architecture (current: M2)
+# Architecture (current: M4)
 
-One page, always accurate. Principles P1–P12 referenced here are defined in
-`RFC-001-agent-native-kernel.md`. For a beginner-level narrative of the same
-material, see `WALKTHROUGH.md`.
+One page, always accurate. Principles P1–P12 are defined in
+`RFC-001-agent-native-kernel.md`. Beginner-level narrative: `WALKTHROUGH.md`.
 
 ## What exists
 
 ```
 host (Python, stdlib only)                guest (qemu -machine virt, -icount)
-┌──────────────────────────────┐          ┌──────────────────────────────────┐
-│ framing.py  encode/decode    │          │ OpenSBI (QEMU's, M-mode)         │
-│ transport.py FrameStream     │  frames  │   ▲ ecall: putchar getchar       │
-│ qemu.py     THE qemu cmdline │◄─────────│   │        set_timer SRST        │
-│ runner.py   acceptance gates │  'r','x' │ kernel (S-mode, 0x80200000)      │
-│ demo.py     narrated tour    │─────────►│ ┌─ hal/ (the unsafe island) ───┐ │
-└──────────────────────────────┘  UART/   │ │ boot.rs  entry asm, bss, sp  │ │
-                                  stdio   │ │ sbi.rs   ecall wrappers      │ │
- frames: AA 99 | u32 LE len | JSON        │ │ csr.rs   CSRs, irq on/off    │ │
- events: {"id":N,"type":...}  id is       │ │ trap.rs  vector save/restore │ │
- globally monotonic == stream order       │ └──────────────────────────────┘ │
-                                          │ traps.rs   dispatch, tick, ring, │
-                                          │            fault frames (safe)   │
-                                          │ console.rs FrameBuf (safe)       │
-                                          │ events.rs  id counter (safe)     │
-                                          │ main.rs    kmain + command loop  │
-                                          └──────────────────────────────────┘
+┌──────────────────────────────┐         ┌───────────────────────────────────┐
+│ framing.py  encode/decode     │         │ OpenSBI (QEMU's, M-mode)          │
+│ transport.py FrameStream      │ frames  │   ▲ ecall: putchar getchar        │
+│ qemu.py     THE qemu cmdline  │◄────────│   │        set_timer SRST         │
+│ runner.py   acceptance gates  │ cmds    │ kernel (S-mode, 0x80200000)       │
+│ demo.py     narrated tour     │────────►│ ┌ hal/ (unsafe island, 56/200) ─┐ │
+└──────────────────────────────┘ r x p m │ │ boot.rs entry, bss, arena i/o │ │
+                                          │ │ sbi.rs  ecall wrappers        │ │
+ frames: AA 99 | u32 LE len | JSON        │ │ csr.rs  CSRs, sscratch, irq   │ │
+ events: {"id":N,...} id == stream order  │ │ trap.rs vector, enter_user    │ │
+                                          │ └───────────────────────────────┘ │
+ payload arena: 0x80400000, 2 MiB,        │ traps.rs dispatch, ring, faults   │
+ one resident payload (no paging yet)     │ elf.rs   ELF64 loader (safe)      │
+                                          │ syscall.rs ABI v0 dispatch (safe) │
+                                          │ payload.rs proc table + scheduler │
+                                          │ console.rs FrameBuf  events.rs id │
+                                          │ main.rs  kmain + idle command loop│
+                                          └───────────────────────────────────┘
 ```
 
-## Control flow after boot
+## Control flow
 
-`_start` (asm: zero bss, set 64K stack) → `kmain`: emit hello (event 0),
-install `stvec` → full 31-GPR+sepc+sstatus save/restore vector, arm the SBI
-timer, then loop: poll `console_getchar` for command bytes, `wfi` otherwise.
+Boot → `kmain`: hello (event 0), assert kernel image ends below the arena,
+install trap vector, arm timer, enter `idle()`. `idle` serves single-byte
+operator commands (P1 seed): `r` ring dump, `x` kernel illegal-instruction,
+`p` M3 payload suite, `m` M4 payload suite. This keeps the boot event stream
+identical to M2 — payloads only run when asked.
 
-- **Timer trap** (every 10_000 timebase units = 500k instructions under
-  `-icount shift=1` — an instruction-count cadence, P9): re-arm, record in
-  ring, emit `tick{seq,time}`.
-- **`'r'` command**: emit `trap_ring` — the last 8 traps (id, cause, sepc).
-  First sliver of P11; the future MCP resource `/trace/traps` (P4 seam) is
-  this same data behind a real protocol.
-- **`'x'` command**: deliberately execute `csrrw x0, cycle, x0` (illegal:
-  cycle is read-only). Any non-timer trap → emit the v0 P6 diagnostic frame
-  (cause, sepc, stval, decoded instruction incl. offending CSR, ra/sp,
-  last-8 trap history) → SBI shutdown. **Faults are never hangs.**
-- **Panic** → structured `panic` frame → shutdown. Same discipline.
+**Payload lifecycle** (sequential; one resident pre-paging): the scheduler
+loads a pending image's ELF into the arena (`elf.rs`, safe, via bounds-checked
+`hal::arena_*`), records a start timestamp + deadline, emits `payload_start`,
+and `hal::enter_user` drops to U-mode. Traps from U-mode land on a dedicated
+kernel trap stack (sscratch swap in the vector). On `ecall`, `syscall::dispatch`
+runs (`exit`/`write`/`yield`/`spawn`, capability-checked); on fault, the P6
+frame is emitted tagged `origin:"payload"` and only the payload dies; on
+timer, an over-budget payload is killed. A departing payload is handed back to
+the scheduler by **rewriting its trap frame** to resume in S-mode on the boot
+stack (`redirect_to_scheduler`) — the normal trap-restore path does the
+context switch, so no separate switch routine is needed. Queue drains →
+`suite_done` → `idle`.
 
 ## Invariants worth defending
 
-- **Emission is atomic**: every emission path runs with interrupts masked —
-  tick/fault frames in trap context (hardware-masked), hello before
-  interrupts are enabled, ring-dump and panic frames under an explicit
-  `without_interrupts`. So frames can't interleave on the wire and event ids
-  strictly increase in stream order; the acceptance suite asserts this
-  stream-wide. Any new emission site outside those contexts must take the
-  wrapper.
-- **Determinism**: the QEMU command line exists in exactly one place
-  (`harness/qemu.py`; `-icount shift=1,sleep=off -rtc clock=vm`). `make
-  test` asserts two input-free boots are byte-identical (E6 seed).
-- **Unsafe island**: `hal/` only — currently 26/200 budget lines across
-  4/4 files (at the file cap; M3 must extend existing hal files, not add).
-  Ring buffer stays safe code via per-field atomics; consistency comes from
-  single-hart execution + irq-off critical sections, not locks.
-- **The serial layer stays dumb**: length-prefix + magic, no checksums, no
-  retransmit, single-byte commands.
+- **Emission is atomic**: every frame is emitted with interrupts masked
+  (trap context for tick/fault/syscall; explicit `without_interrupts` for
+  ring dump, panic, and all payload events). Ids strictly increase in stream
+  order; asserted stream-wide.
+- **Determinism (P9)**: one QEMU command line (`harness/qemu.py`). Input-free
+  boots are byte-identical; the deadline kill lands at the same instruction
+  every run under identical input timing.
+- **Unsafe island**: `hal/` only, 56/200 budget lines, 4/4 files (at the file
+  cap — M5 must extend existing hal files). ELF loading, the process table,
+  the scheduler, and all policy are safe code. Arena access is safe:
+  `hal::arena_{read,write,zero}` bounds-check every access into the fixed
+  arena, which boot asserts is disjoint from the kernel image.
+- **Attenuation (P10)**: `granted = requested & parent_caps & image_ceiling`,
+  so a delegation chain can only shrink. Enforced in `payload::on_spawn`.
+- **The serial layer stays dumb**: length-prefix + magic, single-byte commands.
 
-## Planned seams (deliberately visible, not built)
+## Attachment points for later principles
 
-- **P4 (MCP, M8)**: `FrameStream` reads any fd — virtio-serial will replace
-  the UART beneath it; JSON-RPC rides inside the same frames; `trap_ring`
-  becomes a resource, `'x'`-style pokes become tools.
-- **P6 (M9)**: `fault`/`panic` frames grow page-table walks, richer register
-  files, and a `cause` field pointing at a parent event id (P12) — same
-  event shape, more fields.
-- **M3 (next)**: U-mode entry. `hal/trap.rs` gains an sscratch stack swap
-  (seam noted in the file); payloads/ gets its first ELF.
+- **P4 (MCP, M8)**: `FrameStream` reads any fd; virtio-serial replaces the
+  UART beneath it, JSON-RPC rides inside the same frames. Control ops map to
+  today's command bytes; `trap_ring`/process table become resources.
+- **P6 (M9)**: the `fault` frame (payload + kernel) grows a page-table walk,
+  richer registers, and a `cause` parent id (P12) — same event shape.
+- **P7 (now → M9)**: payload output is already tagged `untrusted` and confined
+  to a JSON string; the write quota bounds a hostile payload's context flood.
+- **M5 (next)**: per-payload page tables (satp) let multiple payloads be
+  resident; the scheduler's single-resident assumption and the arena become
+  per-address-space. `hal/` gains paging; the process table gains an satp
+  root per slot. Real cooperative `yield`/preemptive switch lands here.

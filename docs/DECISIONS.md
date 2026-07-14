@@ -140,3 +140,63 @@ illegal_instruction — loudly, through our own structured fault path. That is
 the enforcement: no FP in kernel code (none exists today; verified by
 disassembly during review). If FP is ever wanted, the trap frame must first
 grow F/D register save/restore and FS management. Revisit no earlier than M5.
+
+**2026-07-14 · M3 · PROVISIONAL · Payloads are a separate cargo workspace, not part of the kernel crate.**
+`payloads/` is its own workspace of U-mode fixtures (sys runtime + hello,
+crasher, and the M4 set). They are userspace, not kernel code, so the hal
+unsafe budget does not apply to them (ci/unsafe_budget.sh scans kernel/src
+only); sys keeps its unsafe minimal regardless (entry asm + ecall shim). The
+kernel embeds their ELFs via include_bytes! (paths from build.rs env vars),
+so `make build` builds payloads first. Alternative — payloads inside the
+kernel crate — would blur the unsafe boundary and the privilege boundary.
+
+**2026-07-14 · M3 · Fixed identity-mapped payload arena at 0x80400000 (2 MiB) until paging.**
+No paging until M5, so one payload is resident at a time at a fixed physical
+address; payloads link there (payloads/link.ld) and the kernel asserts at
+boot that its own image ends below it. Arena access is safe code:
+hal::arena_{read,write,zero} bounds-check every access. This is the honest
+pre-paging model — sequential execution, a run queue of pending images —
+and it is enough to demonstrate P1/P7/P10 seeds without paging. Concurrent
+resident payloads need per-address-space page tables (M5).
+
+**2026-07-14 · M3 · Departing payloads return to the kernel by trap-frame rewrite, not a context switch.**
+When a payload exits/faults/is-killed, the trap handler rewrites its saved
+frame to resume in S-mode on the boot stack at the scheduler entry
+(redirect_to_scheduler), and the normal trap-restore path performs the
+switch. This needs no separate save/restore routine and keeps the only entry
+into a payload a single enter_user (sret). Works because pre-paging no
+payload is ever suspended-and-resumed — every payload runs start→terminal,
+and preemption only kills. When M5 adds true suspend/resume for multiple
+residents, a full-frame switch routine joins hal/trap.rs (global_asm, no new
+inline-unsafe budget).
+
+**2026-07-14 · M3/M4 · PROVISIONAL · Payloads are operator-triggered ('p','m'), not auto-run at boot.**
+Boot drops straight to the idle command loop exactly as in M2, so the boot
+event stream and the trap ring stay all-timer until the operator acts — the
+M2 acceptance assertions remain valid unchanged. 'p' runs the M3 suite
+(hello, crasher), 'm' the M4 suite (muzzled, spawner→child, runaway). This
+also matches P1 (the operator decides when to spawn) and the DECISIONS
+precedent that fault/ring are operator-triggered bytes.
+
+**2026-07-14 · M4 · Capability denial and deadline kill are structured events, not just errnos.**
+A refused syscall returns ENOCAP AND emits a `syscall_denied` event; an
+over-budget payload emits `payload_killed`. The errno alone could be swallowed
+by the payload; the event cannot. This is the P1/P6 stance — every policy
+decision the kernel makes is observable to the operator — applied to the
+sandbox surface.
+
+**2026-07-14 · M4 · PROVISIONAL · Deadlines measured in timebase units via rdtime, not rdinstret.**
+CLAUDE.md/P9 want instruction-count deadlines. Under -icount shift=1 the
+timebase (rdtime) is a deterministic function of retired instructions
+(1 unit ≈ 50 instructions), and rdtime is already proven to work from S-mode
+here, so deadlines are expressed in timebase units and are a deterministic
+instruction proxy. Verified: the runaway is killed at the identical point
+every run under identical input timing. If an exact retired-instruction count
+is ever needed, add rdinstret to hal/csr.rs (guarded by scounteren).
+
+**2026-07-14 · M4 · PROVISIONAL · Cooperative yield is a no-op reschedule pre-paging.**
+yield is capability-gated and emits a payload_yield event, but with one
+resident payload there is nothing to switch to, so it resumes the caller.
+Real rescheduling needs multiple resident payloads (M5). The syscall and its
+cap gate are wired now so the ABI is stable; only the scheduler behaviour
+changes at M5.

@@ -125,13 +125,78 @@ The design goal (measured properly at milestone M9/E1): an agent reading
 this frame — and nothing else — should be able to localize the bug. Then the
 kernel shuts the machine down cleanly. A fault must never be a hang.
 
+## Running programs *under* the kernel (M3)
+
+Everything so far was the kernel itself. Now for the point of an operating
+system: running other programs. Send `p` and the kernel loads two small
+**user programs** — separately compiled binaries under `payloads/` — and runs
+each in **user mode**, the CPU's unprivileged level. A user-mode program
+can't touch hardware; to do anything real it makes a **system call**, asking
+the kernel (via the `ecall` instruction, the same mechanism the kernel uses
+to call OpenSBI).
+
+```json
+{"id":7,"type":"payload_start","pid":0,"name":"hello","entry":"0x80400000","caps":["write"]}
+{"id":9,"type":"payload_output","pid":0,"untrusted":true,"len":20,"data":"hello from userspace"}
+{"id":11,"type":"payload_exit","pid":0,"code":0}
+```
+
+Three things:
+
+- **The kernel loaded an ELF file** (the standard executable format) into a
+  fenced-off region of memory (the "arena", at `0x80400000`), then dropped to
+  user mode to run it. `payload_start` announces this; `caps` is the program's
+  **capability set** — the exact list of privileged operations it's allowed
+  to request. This one may `write`, nothing else.
+- **Output is tagged `"untrusted": true`.** Bytes coming *from* a workload are
+  data, never instructions — the kernel confines them to a JSON string and
+  never lets them be read as commands by itself or its operator (principle P7:
+  the kernel defends its operator from being social-engineered by the
+  workload). There's also a length cap so a hostile program can't flood the
+  operator's attention.
+- **`sys_exit` ends the program.** `pid` (process id) distinguishes programs.
+
+The second program (`crasher`) deliberately executes an instruction only the
+kernel is allowed to run. It faults — and the kernel emits the *same*
+structured report as before, but with `"origin": "payload"`, and **kills only
+that program**. The kernel keeps running. A user program crashing is an event,
+not a catastrophe (principle P1). `suite_done` then summarizes.
+
+## The sandbox: capabilities, delegation, deadlines (M4)
+
+Send `m` for four programs that show the kernel enforcing policy on its own,
+with no human in the loop:
+
+- **A muzzled program** (empty capability set) tries to `write`. Refused:
+  `{"type":"syscall_denied","syscall":"write","reason":"missing_cap"}`. The
+  refusal is a *structured event* the operator can see — not a silent error
+  the program could hide. A program can only do what it was granted.
+- **A spawner** creates a child program and tries to hand it the `write` and
+  `yield` capabilities. But the spawner itself doesn't hold `yield`, so the
+  kernel **attenuates** the grant — the child gets only `write`:
+  `{"type":"payload_spawn","requested":["write","yield"],"granted":["write"],"attenuated":true}`.
+  A program can never delegate power it doesn't have; a chain of hand-offs can
+  only ever shrink (principle P10), and the kernel enforces this, not
+  convention.
+- **A runaway** loops forever on purpose. The kernel gave it an instruction
+  budget when it started; when the timer notices it has blown past that
+  budget, it kills it: `{"type":"payload_killed","reason":"deadline"}`. A
+  workload can't wedge the machine by spinning. Because the budget is measured
+  in *instructions*, not wall-clock time, the kill lands at the exact same
+  point every run.
+
+That is the whole thesis in miniature: the mechanism (traps, privilege,
+memory fencing) is boring and autonomous; every *policy* decision — grant,
+deny, attenuate, kill — is an observable structured event, which is exactly
+what an AI operator needs to supervise the system.
+
 ## Try it yourself
 
 ```sh
-make demo    # the narrated version of everything above
-make run     # raw boot: OpenSBI banner, then framed events; press r / x
-make test    # the full acceptance gate (framing, boot, traps, hardening,
-             # determinism, demo) — ~2 seconds, 8 QEMU boots
+make demo    # the narrated version of everything above (M0-M4)
+make run     # raw boot; then press: r (ring) x (crash kernel) p (M3) m (M4)
+make test    # the full acceptance gate (framing, boot, traps, payloads,
+             # sandbox, hardening, determinism, demo) — a few seconds
 make debug   # boot frozen at the first instruction, gdb stub listening
 make gdb     # (second terminal) attach; try: break kernai::kmain, continue
 ```
@@ -139,9 +204,15 @@ make gdb     # (second terminal) attach; try: break kernai::kmain, continue
 ## Glossary
 
 - **RISC-V** — an open CPU instruction set; `rv64` = its 64-bit variant.
-- **S-mode / M-mode** — CPU privilege levels. OpenSBI runs in M(achine)
-  mode, the kernel in S(upervisor) mode; user programs (from M3 on) will run
-  in U(ser) mode. Each level can't touch the ones above it.
+- **S-mode / M-mode / U-mode** — CPU privilege levels. OpenSBI runs in
+  M(achine) mode, the kernel in S(upervisor) mode, user programs (payloads)
+  in U(ser) mode. Each level can't touch the ones above it — that boundary is
+  what makes a crashing payload survivable.
+- **payload** — a user program the kernel runs (in `payloads/`). A **capability**
+  is a token granting one privileged operation (`write`/`yield`/`spawn`); a
+  payload's **CapSet** is all it holds. **Attenuation** = granting a subset.
+- **syscall** — a payload's request to the kernel (`ecall`): exit, write,
+  yield, spawn. The kernel's side is `kernel/src/syscall.rs`.
 - **SBI** — the "system call" interface the kernel uses to ask OpenSBI for
   things (print a byte, set the timer, shut down). Made via the `ecall`
   instruction.

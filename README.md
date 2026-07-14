@@ -4,8 +4,11 @@ An agent-native RISC-V unikernel. See `docs/RFC-001-agent-native-kernel.md` for
 the thesis and `CLAUDE.md` for working conventions. New here — or new to
 kernels entirely? Start with `docs/WALKTHROUGH.md`, then run `make demo`.
 
-Current state: **M2** (boot, traps, SBI timer, trap ring buffer, structured
-fault reports). See `docs/HANDOFF.md` for the exact next step.
+Current state: **M4** — boot, traps, SBI timer, trap ring, structured fault
+reports (M0–M2); U-mode payloads running to `sys_exit` with isolation
+(M3); a capability-gated syscall surface with spawn attenuation and
+instruction-count deadline kill (M4). See `docs/HANDOFF.md` for the exact
+next step (M5: paging).
 
 ## Bootstrap (Ubuntu 24.04 or similar)
 
@@ -27,15 +30,19 @@ rustup target list --installed --toolchain nightly-2026-07-14 | grep riscv64gc
 ## Use
 
 ```sh
-make build   # build the kernel ELF (release)
+make build   # build payload workspace, then the kernel ELF (release)
 make run     # boot it under QEMU (-icount, deterministic) with serial on stdio
-make demo    # narrated tour: boot, ticks, ring query, fault report, determinism
+make demo    # narrated tour: boot, ticks, ring, payloads, sandbox, fault, determinism
 make test    # full acceptance suite: framing (M0), boot (M1), traps/timer/fault
-             # (M2), input hardening, determinism, demo — plus unsafe budget;
-             # this is what CI runs
+             # (M2), U-mode payloads (M3), caps/spawn/deadline (M4), input
+             # hardening, determinism, demo — plus unsafe budget; CI runs this
 make debug   # boot QEMU halted with a gdb stub on :1234
 make gdb     # attach gdb-multiarch to a running `make debug`
 ```
+
+Once booted (`make run`), the kernel serves single-byte operator commands on
+the serial line: `r` dumps the trap ring, `x` crashes the kernel on purpose,
+`p` runs the M3 payload suite, `m` runs the M4 sandbox suite.
 
 `make test` must pass from a fresh clone after the bootstrap above; if it
 doesn't, that is a bug.
@@ -50,7 +57,7 @@ deadlines are therefore exact instruction counts and identical across runs.
 
 ```
 kernel/    no_std kernel; src/hal/ is the only unsafe island (budget-enforced)
-payloads/  tiny rv64 acceptance-test ELFs + build script (populated at M3)
+payloads/  cargo workspace of tiny rv64 U-mode payloads (sys runtime + fixtures)
 harness/   host-side Python driver: framing, QEMU transport, milestone runner
 ci/        unsafe budget check, GitHub Actions helpers
 docs/      RFC-001, ARCHITECTURE.md, DECISIONS.md, HANDOFF.md

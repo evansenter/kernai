@@ -5,74 +5,67 @@ beyond this repo (we dogfood E3 on ourselves).
 
 ## Current state (2026-07-14, session 1)
 
-**M0, M1, M2 are complete and green.** `make test` from a fresh clone runs
-six checks in ~2s (verified: fresh clone in a scratch dir, plus 10
-consecutive full-suite runs with zero flakes):
+**M0–M4 complete and green.** `make test` from a fresh clone runs eight
+checks in a few seconds:
 
-1. `m0` — framing round-trips over a real pipe (loopback `cat` stub)
+1. `m0` — framing round-trips over a real pipe (loopback stub)
 2. `m1` — boot to hello frame over the SBI console (RFC acceptance 1)
-3. `m2` — 5 monotonic timer ticks (acceptance 2); trap-ring query answered;
-   deliberate illegal instruction → structured fault frame with decoded
-   fields → clean shutdown, not a hang (acceptance 3)
-4. `hardening` — 200 ticks stay contiguous under garbage serial input
-5. `determinism` — two input-free boots are byte-identical (P9 / E6 seed)
-6. `demo` — the narrated `make demo` completes
+3. `m2` — monotonic timer ticks (acceptance 2); trap-ring query; deliberate
+   kernel illegal instruction → structured fault → clean shutdown (acc. 3)
+4. `m3` — a U-mode payload ELF runs to `sys_exit`; output tagged untrusted;
+   a payload fault yields a structured `origin:"payload"` report and kills
+   only the payload — the kernel survives and keeps answering
+5. `m4` — capability enforcement (ENOCAP + `syscall_denied` event), spawn
+   with attenuation (`granted ⊆ parent`, P10), instruction-count deadline
+   kill of a runaway (`payload_killed`), post-suite liveness
+6. `hardening` — 200 ticks contiguous under garbage serial input
+7. `determinism` — two input-free boots byte-identical (P9 / E6 seed)
+8. `demo` — the narrated `make demo` (now M0–M4) completes
 
 CI (`.github/workflows/ci.yml`) runs the same gate + `ci/unsafe_budget.sh`
-on every push. Unsafe budget: **26/200 lines in 4/4 hal files** — the file
-cap is fully used; M3's new unsafe (satp, sscratch swap, U-mode entry) must
-extend `hal/csr.rs` / `hal/trap.rs`, not add files.
+on every push. **Unsafe budget: 56/200 lines in 4/4 hal files** — the file
+cap is fully used; M5's paging code must extend `hal/csr.rs` / `hal/boot.rs`
+/ `hal/trap.rs`, never add a 5th unsafe file.
 
-Toolchain: nightly-2026-07-14 (pinned in rust-toolchain.toml), QEMU 8.2.2
-(`qemu-system-misc` on Ubuntu 24.04), gdb-multiarch 15.1. The gdb path was
-smoke-tested: `make debug` + `break kernai::kmain` hits with source info.
+Toolchain: nightly-2026-07-14 (rust-toolchain.toml), QEMU 8.2.2
+(`qemu-system-misc`), gdb-multiarch 15.1. `make build` builds the payload
+workspace first (the kernel embeds their ELFs), then the kernel.
 
-## Scope notes for the reviewer
+## What the operator can do (single serial command bytes)
 
-- Session instruction mid-flight: "keep going after M2 until everything is
-  done and completely battle tested, with demos". Interpreted as *harden and
-  demo M0–M2*, *not* as starting M3 — the original brief said "Stop there —
-  do not start M3" explicitly. Logged in DECISIONS.md. If "everything" meant
-  more milestones, that's session 2.
-- All RFC open questions touched so far have PROVISIONAL answers in
-  DECISIONS.md (framing format, transport-until-M8, console mechanism,
-  operator-triggered fault injection).
-
-## Review pass
-
-Six parallel adversarial reviewers (asm, kernel logic, harness, budget
-script, compliance, docs accuracy) audited the tree; every confirmed finding
-was fixed the same session — see the "Corrections + fixes" entry in
-DECISIONS.md for the list (highlights: budget scanner learned raw strings,
-harness watchdogs became whole-wait deadlines, FrameBuf 2 KiB so fault
-frames can't poison into silence, panic handler hardened, exact tick
-cadence). The suite was re-stressed after the fixes: 15+ consecutive green
-full-suite runs total.
+`r` dump trap ring · `x` crash the kernel (illegal instr → shutdown) ·
+`p` run the M3 payload suite · `m` run the M4 sandbox suite.
 
 ## Known-broken / caveats
 
 - Nothing known-broken.
-- `console_getchar` polling means an input byte can wait up to one tick
-  (~1 ms virtual) — fine now, revisit if command latency ever matters.
-- The determinism check covers input-free boots only; replaying *operator
-  inputs* deterministically is the M7 story.
-- The budget script's SAFETY-comment walk is looser than clippy's (an
-  unrelated comment directly above an unsafe can satisfy it); clippy's
-  `undocumented_unsafe_blocks = deny` remains the authoritative check.
+- One payload is resident at a time (no paging); `yield` is a no-op
+  reschedule and `spawn`'d children run after the parent (sequential). All
+  three go away at M5 with per-payload address spaces.
+- Deadlines are in timebase units (deterministic instruction proxy under
+  -icount), not exact retired-instruction counts — see DECISIONS.md.
+- The budget script's SAFETY-comment walk is looser than clippy's; clippy's
+  `undocumented_unsafe_blocks = deny` remains authoritative.
 
 ## Exact next step
 
-**M3: U-mode entry.** Per RFC milestone ladder: load a tiny rv64 ELF payload
-(in `payloads/`, currently a stub README) into memory, drop to U-mode, run
-it to a `sys_exit` ecall. Concretely:
+**M5: paging + isolation suite.** Per the RFC ladder. Concretely:
 
-1. Add an sscratch-based kernel-stack swap to `hal/trap.rs` (seam is
-   commented there) so traps from U-mode land on a kernel stack.
-2. First payload + its build script under `payloads/` (static rv64 ELF,
-   linked away from the kernel's 0x80200000).
-3. Acceptance: harness boots, payload runs, its `sys_exit` arrives as a
-   structured event; a payload fault must produce the same fault frame the
-   kernel's own faults do.
+1. `hal/` gains Sv39 page-table types and a `satp` switch (extend
+   `hal/csr.rs` + a new safe `mm.rs`/`paging` module above hal for the safe
+   table-building logic; keep the raw satp write and TLB flush in hal). A
+   `FrameAllocator` (safe, plain-data — P11) hands out physical frames.
+2. Each process slot gains a page-table root; the loader maps the payload's
+   segments into its own address space instead of the shared arena, so
+   multiple payloads can be resident. The scheduler's single-resident
+   assumption (payload.rs) and `enter_user`/`redirect_to_scheduler` grow a
+   real suspend/resume switch (full-frame, in `hal/trap.rs` global_asm — no
+   new inline-unsafe budget).
+3. Isolation suite: a payload that reads/writes outside its map faults
+   (store/load page fault, `origin:"payload"`); W^X enforced; one payload
+   cannot see another's memory. Acceptance: the fault frame's page-table walk
+   (the M9 P6 growth can start here) shows the bad access.
 
-Before starting: re-read CLAUDE.md's milestone gate — M2 must stay green in
-CI on every push.
+Before starting: re-read CLAUDE.md's milestone gate — M4 must stay green in
+CI on every push, and the unsafe file cap (4) is already reached, so plan
+M5's unsafe as edits to the existing hal files.

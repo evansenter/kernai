@@ -112,7 +112,92 @@ CPU was interrupted. This is the seed of the kernel-as-queryable-database
 idea the whole project is built around.
 """)
 
-        say("[4/5] Deliberately crashing it (the good part)...")
+        say("[4/7] Running a user program under the kernel...")
+        note("""
+So far everything has been the kernel itself. Now we send 'p' to load two
+small *user* programs — separate compiled binaries — and run them in
+"user mode", the CPU's unprivileged level where a program can't touch the
+hardware directly. It has to ask the kernel, via a "system call". The first
+program prints a line and exits; the second deliberately misbehaves.
+""")
+        q.send(b"p")
+        p_start = get(q, "payload_start")
+        show(p_start)
+        note("""
+payload_start: the kernel loaded the "hello" program from an ELF file (the
+standard executable format), placed it in a fenced-off memory region, and
+dropped to user mode to run it. "caps" is its capability set — the exact
+list of privileged things it's allowed to ask for. This one may "write".
+""")
+        show(get(q, "payload_output"))
+        note("""
+The program asked the kernel to print for it. Crucially the output is tagged
+"untrusted": true. The kernel treats bytes coming FROM a workload as data,
+never as instructions to itself or its operator (principle P7 — the kernel
+defends its operator from being social-engineered by the workload).
+""")
+        show(get(q, "payload_exit"))
+        # The second payload faults; catch its report.
+        get(q, "payload_start")
+        get(q, "payload_output")
+        pfault = get(q, "fault")
+        show(pfault)
+        note("""
+The second program tried to do something only the kernel is allowed to do
+(touch a privileged register). Watch what happened: origin is "payload", so
+the kernel produced the SAME structured fault report as before — but instead
+of shutting down, it killed just that one program and kept running. A
+user program crashing is an event, not a catastrophe (principle P1).
+""")
+        show(get(q, "suite_done"))
+        note('suite_done: one program exited cleanly, one faulted. The kernel is fine.')
+
+        say("[5/7] The sandbox: capabilities, delegation, and runaway control...")
+        note("""
+Send 'm' for four more programs that show the kernel enforcing policy:
+  • a "muzzled" program with NO capabilities tries to print — denied
+  • a "spawner" tries to create a child program, handing it capabilities
+  • a "runaway" program loops forever on purpose
+Watch the kernel handle each without a human intervening.
+""")
+        q.send(b"m")
+        events = []
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            e = q.next_event(60)
+            if e["type"] == "tick":
+                continue
+            events.append(e)
+            if e["type"] == "suite_done":
+                break
+        denied = next(e for e in events if e["type"] == "syscall_denied" and e["syscall"] == "write")
+        show(denied)
+        note("""
+The muzzled program's print was refused: ENOCAP. The refusal is itself a
+structured event ("syscall_denied") the operator can see — not a silent
+error code the program could hide. Capabilities are the security substrate:
+a program can only do what it was explicitly granted.
+""")
+        spawn = next(e for e in events if e["type"] == "payload_spawn")
+        show(spawn)
+        note("""
+The spawner asked to give its child the "write" AND "yield" capabilities —
+but the spawner itself doesn't hold "yield". So the kernel *attenuated* the
+grant: the child got only "write" ("attenuated": true). A program can never
+hand out power it doesn't have; a chain of delegations can only ever shrink
+(principle P10). This is enforced by the kernel, not by good manners.
+""")
+        killed = next(e for e in events if e["type"] == "payload_killed")
+        show(killed)
+        note("""
+And the runaway that looped forever? The kernel gave it an instruction
+budget when it started; when the timer noticed it had blown past that
+budget, it killed it — "reason": "deadline". A workload can't wedge the
+machine by spinning. Because time here is measured in instructions, not
+the wall clock, this kill happens at the EXACT same point every single run.
+""")
+
+        say("[6/7] Deliberately crashing the kernel itself (the good part)...")
         note("""
 Now we send 'x', which tells the kernel to execute an instruction that is
 forbidden by the CPU spec: writing to the read-only 'cycle' counter
@@ -140,7 +225,7 @@ Reading it like the kernel does:
         except subprocess.TimeoutExpired:
             raise AssertionError("kernel hung after fault report")
 
-    say("[5/5] Proving determinism (run it again, get identical bytes)...")
+    say("[7/7] Proving determinism (run it again, get identical bytes)...")
     note("""
 The emulator is configured so virtual time is computed from the instruction
 count (-icount), not the host clock. Same program + same inputs = the same
@@ -162,10 +247,12 @@ agent ever sees is exactly reproducible.
         show(json.loads(fa))
     say(f"Two fresh boots produced identical streams ({len(a)} frames compared).")
     note("""
-That's M0-M2: a talking, introspectable, deterministic kernel skeleton.
-Next up (M3): running a separate user program *under* the kernel, in
-unprivileged mode. See docs/WALKTHROUGH.md for the full guided tour and
-docs/RFC-001-agent-native-kernel.md for where this is going.
+That's M0-M4: a kernel that boots, narrates itself in structured events,
+runs sandboxed user programs, enforces capabilities and delegation, kills
+runaways on an instruction budget, and reproduces byte-for-byte every run.
+Next up (M5): giving each program its own private memory map (paging), so
+several can be resident at once. See docs/WALKTHROUGH.md for the full guided
+tour and docs/RFC-001-agent-native-kernel.md for where this is going.
 """)
 
 
