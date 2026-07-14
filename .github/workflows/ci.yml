@@ -1,0 +1,32 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install QEMU + cross gdb
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-misc gdb-multiarch
+
+      - name: Install pinned Rust toolchain (from rust-toolchain.toml)
+        run: rustup toolchain install
+
+      - name: Toolchain versions
+        run: |
+          qemu-system-riscv64 --version
+          rustc --version
+          python3 --version
+
+      - name: make test
+        run: make test
+
+      - name: unsafe budget (explicit)
+        run: ci/unsafe_budget.sh
