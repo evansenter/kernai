@@ -1,0 +1,21 @@
+[package]
+name = "kernai"
+version = "0.1.0"
+edition = "2024"
+
+# Zero dependencies, deliberately: the kernel is core-only. Anything we need
+# (frame writer, ring buffer) is small enough to own outright, and the supply
+# chain stays empty.
+[dependencies]
+
+[profile.release]
+panic = "abort"
+lto = true
+codegen-units = 1
+debug = true        # keep DWARF for `make debug` / gdb-multiarch
+
+[profile.dev]
+panic = "abort"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"

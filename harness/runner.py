@@ -27,6 +27,19 @@ def m0_framing():
         raise AssertionError(f"framing unit tests failed:\n{proc.stderr}")
 
 
+@milestone("m1")
+def m1_boot_hello():
+    """Kernel boots; hello frame arrives over the SBI console (acceptance 1)."""
+    from .qemu import KERNEL_ELF, QemuKernel
+    assert KERNEL_ELF.exists(), f"{KERNEL_ELF} missing — run `make build`"
+    with QemuKernel() as q:
+        evt = q.next_event(timeout=60)
+        assert evt is not None, f"EOF before any frame; stderr: {q.stderr_tail()}"
+        assert evt.get("type") == "hello", f"first event is not hello: {evt}"
+        assert evt.get("id") == 0, f"hello must be event 0: {evt}"
+        assert evt.get("proto") == 0, f"unknown protocol: {evt}"
+
+
 def main(argv):
     which = argv[1] if len(argv) > 1 else "all"
     names = list(MILESTONES) if which == "all" else [which]
