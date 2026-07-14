@@ -62,3 +62,40 @@ ci/unsafe_budget.sh. Costs us ~40 lines of hand-written ecall/CSR wrappers.
 A truncated JSON diagnostic parses as garbage or, worse, parses clean with
 missing fields; an absent frame is unambiguous. Buffer is 1 KiB; events are
 designed small (P3 — operator attention is metered).
+
+**2026-07-14 · M2 · PROVISIONAL · Fault injection and ring queries are operator-triggered bytes ('x', 'r'), not tick-count-triggered.**
+Alternatives: self-inject after N ticks (deterministic but couples acceptance
+timing to host stdin delivery — under icount the guest outruns wall clock, so
+any fixed N races the harness), or no query path at all. Single command bytes
+over the existing serial line keep the guest's liveness independent of host
+timing, exercise a real input path, and are the embryo of P1's external
+control plane. Replay of operator inputs (P9 full story) lands at M7.
+
+**2026-07-14 · M2 · Frame emission runs entirely under interrupts-disabled.**
+`without_interrupts` wraps id allocation + byte output for every frame. Cost:
+tick latency can stretch by one frame emission (~66 ecalls ≪ the 500k-insn
+tick interval). Buys two load-bearing invariants: frames never interleave on
+the wire, and event ids strictly increase in stream order — asserted
+stream-wide by the acceptance suite, and the substrate P12's causal graph
+will stand on.
+
+**2026-07-14 · M2 · Trap ring is atomics-per-field, not a lock.**
+A proper Mutex needs UnsafeCell (unsafe outside hal) or a dependency. Per-field
+relaxed atomics are safe code; consistency is structural: the only writer runs
+in the trap handler (interrupts hardware-disabled), readers snapshot under
+without_interrupts, single hart (SMP is a non-goal). If SMP ever stopped
+being a non-goal this is the first thing to revisit.
+
+**2026-07-14 · M2 · Deliberate illegal instruction is `csrrw x0, cycle, x0` (0xc0001073).**
+Alternatives: `.word 0` or all-ones (guaranteed illegal but decode to
+nothing instructive). Writing the read-only cycle counter is illegal per the
+privileged spec AND decodes into meaningful fields — the fault report can
+show opcode=SYSTEM, csr=0xc00 and thereby *why* it trapped. Better P6 demo,
+same one instruction.
+
+**2026-07-14 · M2 · Battle-testing scope: hardening + determinism + demo in `make test`.**
+Session instruction "completely battle tested, with demos" interpreted as:
+harden and demo M0–M2, do NOT start M3 (original brief was explicit:
+"Stop there"). Added to the permanent gate: 200-tick monotonicity under
+garbage input, byte-identical double-boot (E6 seed), and the narrated demo
+itself. The full gate stays under ~5s so nobody is tempted to skip it.
