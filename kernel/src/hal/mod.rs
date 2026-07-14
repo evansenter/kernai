@@ -7,6 +7,13 @@
 //! memory unsafety through this API".
 
 mod boot;
+mod csr;
 mod sbi;
+mod trap;
 
-pub use sbi::{console_putchar, shutdown};
+pub use csr::{
+    enable_timer_interrupts, read_scause, read_stval, read_time, wait_for_interrupt,
+    without_interrupts,
+};
+pub use sbi::{console_getchar, console_putchar, set_timer, shutdown};
+pub use trap::{init as traps_init, trigger_illegal_instruction};

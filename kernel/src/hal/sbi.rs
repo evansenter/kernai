@@ -31,6 +31,19 @@ pub fn console_putchar(byte: u8) {
     sbi_call(0x01, 0, byte as usize, 0);
 }
 
+/// Legacy console getchar (EID 0x02): non-blocking, None when no byte is
+/// pending. This is the entire control plane until MCP lands (M8).
+pub fn console_getchar() -> Option<u8> {
+    let (ret, _) = sbi_call(0x02, 0, 0, 0);
+    u8::try_from(ret).ok()
+}
+
+/// TIME extension (EID "TIME"): raise a timer interrupt when the timebase
+/// reaches `deadline`; also clears any pending timer interrupt.
+pub fn set_timer(deadline: u64) {
+    sbi_call(0x5449_4D45, 0, deadline as usize, 0);
+}
+
 /// System Reset extension (EID "SRST"): shutdown, never returns.
 /// `failure` selects the SBI reset reason (0 = no reason, 1 = system failure).
 pub fn shutdown(failure: bool) -> ! {

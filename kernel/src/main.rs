@@ -9,6 +9,7 @@ mod console;
 mod events;
 #[allow(unsafe_code)]
 mod hal;
+mod traps;
 
 use core::fmt::Write;
 
@@ -16,16 +17,31 @@ use console::FrameBuf;
 
 /// Kernel proper. Called exactly once from hal::boot with a stack and
 /// zeroed .bss. `dtb` is parked until something needs the device tree.
+///
+/// After boot the kernel free-runs timer ticks and serves single-byte
+/// serial commands — the embryo of P1's externalized control plane:
+///   'r' → dump the trap ring (P11 seed)
+///   'x' → deliberately execute an illegal instruction (M2 acceptance 3)
 pub fn kmain(_hartid: usize, _dtb: usize) -> ! {
     let mut f = FrameBuf::new();
     let _ = write!(
         f,
-        r#"{{"id":{},"type":"hello","name":"kernai","proto":0,"milestone":"M1"}}"#,
+        r#"{{"id":{},"type":"hello","name":"kernai","proto":0}}"#,
         events::next_id()
     );
     f.emit();
 
-    hal::shutdown(false)
+    hal::traps_init();
+    hal::set_timer(hal::read_time() + traps::TICK_INTERVAL);
+    hal::enable_timer_interrupts();
+
+    loop {
+        match hal::console_getchar() {
+            Some(b'r') => traps::emit_ring_dump(),
+            Some(b'x') => hal::trigger_illegal_instruction(),
+            _ => hal::wait_for_interrupt(), // park until the next tick
+        }
+    }
 }
 
 #[panic_handler]
