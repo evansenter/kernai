@@ -1,4 +1,4 @@
-# Architecture (current: M11)
+# Architecture (current: M12 — ladder complete)
 
 One page, always accurate. Principles P1–P12 are defined in
 `RFC-001-agent-native-kernel.md`. Beginner-level narrative: `WALKTHROUGH.md`.
@@ -135,6 +135,10 @@ next. Queue drains → `suite_done` → `idle`.
   self-manage attention: at `autonomous` it suppresses trace-severity tick
   *frames* from the wire (still counting them + checking deadlines), leaving the
   digest to pull on demand. Both are `traps.rs` state + `rpc.rs` verbs.
-- **E1–E8 (M12, next)**: wire the M9 two-surface toggle into an actual A/B eval
-  harness over a seeded-bug stimulus set (E1 headline), plus E2/E3/E5. The eval
-  suite ships as the public benchmark; the MCP surface as the published spec.
+- **E1/E3/E6 (M12, done)**: `harness/eval.py` scores the two surfaces over a
+  seeded-fault set — the structured surface recovers 13/13 localization facts,
+  the classic printf twin 6/13 (`make eval`; the `e1` check asserts the gap).
+  `e3` reconstructs state from resources alone (cold handoff); `e6` is M7's
+  replay. The MCP surface is published as `docs/SPEC.md` v0.1 — the RFC's
+  durable artifact. Remaining evals (full agent-loop E1, E2/E4/E5/E7/E8) are
+  future work; the M0–M12 ladder is complete.

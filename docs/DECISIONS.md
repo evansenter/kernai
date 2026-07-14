@@ -505,3 +505,20 @@ untouched. Default is reactive, so every existing check (m2/hardening/
 determinism, which depend on tick frames) is unaffected; only `m11` flips the
 dial. Chosen a runtime dial over a build flag for the same reason as the M9
 surface twin: one binary, one recorded session can exercise both modes.
+
+**2026-07-14 · M12 · E1 shipped as a deterministic surface-content proxy; full agent-in-the-loop E1 deferred (needs model access).**
+The RFC's headline E1 scores kernel *surfaces* against a fixed operator agent
+(localization rate/time/tokens). A real agent-in-the-loop eval needs model/network
+access CI lacks and is non-deterministic, so M12 ships the deterministic proxy
+that CI can run: for the seeded-fault set (crasher/wild/wxviol), score how many
+of the localization facts an operator needs are machine-recoverable from each
+surface's output. It measures the ceiling of what any agent could extract — i.e.
+it tests P6 directly ("the frame alone suffices"), which is exactly the surface-
+vs-agent isolation E1 is about. Result: the structured surface recovers 13/13
+facts, the classic printf twin 6/13 — the gap is the root-cause detail (decoded
+instruction, violated page permission, causal parent, register file). `harness/
+eval.py` prints the scorecard (`make eval`); `runner.py::e1` asserts the gap in
+CI. E3 (cold handoff) ships as `runner.py::e3` (a fresh reader reconstructs state
+from spec/processes/digest alone); E6 was M7. E2/E4/E5/E7/E8 and the full
+agent-loop E1 are future work — logged rather than blocking the ladder's close.
+The MCP surface is published as `docs/SPEC.md` v0.1 (the RFC's durable artifact).

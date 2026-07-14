@@ -5,8 +5,9 @@ beyond this repo (we dogfood E3 on ourselves).
 
 ## Current state (2026-07-14, session 2)
 
-**M0–M11 complete and green.** `make test` from a fresh clone runs fifteen
-checks in ~9 seconds (fmt + clippy + build + unsafe budget first):
+**M0–M12 complete and green — the RFC ladder is finished.** `make test` from a
+fresh clone runs seventeen checks in ~11 seconds (fmt + clippy + build + unsafe
+budget first):
 
 1. `m0` — framing round-trips over a real pipe (loopback stub)
 2. `m1` — boot to hello frame over the SBI console (RFC acceptance 1)
@@ -46,8 +47,14 @@ checks in ~9 seconds (fmt + clippy + build + unsafe budget first):
     count) + at most `budget` notable traps, preserving the high-severity ones;
     the `set_autonomy` dial suppresses trace-severity tick frames at autonomous
     while still counting them (and checking deadlines)
-14. `determinism` — two input-free boots byte-identical (P9 / E6 seed)
-15. `demo` — the narrated `make demo` (now 11 acts, incl. MCP + two-surface)
+14. `e1` — the RFC headline (surface-content proxy): over the seeded-fault set,
+    the structured surface recovers every localization fact (13/13) and the
+    classic printf twin far fewer (6/13) — the gap is the root-cause detail P6
+    says decides debuggability (`make eval` prints the scorecard)
+15. `e3` — cold handoff: a fresh reader reconstructs state from the
+    spec/processes/digest resources alone (P5/P11/P12)
+16. `determinism` — two input-free boots byte-identical (P9 / E6 seed)
+17. `demo` — the narrated `make demo` (now 11 acts, incl. MCP + two-surface)
 
 CI (`.github/workflows/ci.yml`) runs the same gate + `ci/unsafe_budget.sh`
 on every push. **Unsafe budget: 55/200 lines in 4/4 hal files** — the file
@@ -106,30 +113,29 @@ client and `runner.py::m8`…`m11` for full sessions.
 
 ## Exact next step
 
-**M12: the E1–E8 evaluation suite (+ demos).** The last rung of the RFC ladder,
-and the point of the whole project: score *kernel surfaces* against a fixed
-agent. The mechanism substrate already exists — M9 gives the two surfaces
-(agentic frame vs. classic printf twin), the seeded-bug idea maps onto the
-existing fault fixtures (crasher, wild, wxviol, leaker), and the harness can
-drive either surface over MCP.
+**The M0–M12 ladder is complete and green.** All twelve milestones and their
+acceptance checks are in `make test`; the twelve principles P1–P12 each have a
+concrete, tested mechanism; the MCP surface is published (`docs/SPEC.md`).
 
-1. **E1 (headline — diagnostic sufficiency):** build an A/B harness that, for a
-   set of seeded faults, presents an operator agent with ONLY the kernel's
-   output — structured frames on one arm, the classic printf line on the other
-   (flip via `set_surface`) — and measures localization rate / tokens. Start
-   with the existing fault fixtures as the stimulus set; grow it toward the
-   RFC's N≥20 (red-team-generated bugs that compile clean and fail ≤1 check).
-2. **E6 is already done** (M7 deterministic replay); **E3 (cold handoff)** is
-   partly dogfooded via HANDOFF.md — consider an automated check that a fresh
-   reader reconstructs state purely from `resources/read {spec,processes,
-   trap_ring,digest}` (P5/P11/P12). **E2/E5** as time allows.
-3. Wire the eval(s) into `make test` (or a separate `make eval`, since a
-   real agent-in-the-loop eval may need network/model access the CI lacks —
-   decide and log; a deterministic proxy-metric version can live in CI).
-4. Demos + spec: package the MCP surface (tool schemas, resource layout, frame
-   format, provenance rules) as a versioned `docs/SPEC.md` v0.1 — the durable
-   artifact the RFC calls out.
+Expansion directions, in the RFC's spirit (pick by value; none is blocking):
 
-After M12 the ladder is complete; expand per the RFC's spirit — the E-series as
-a public benchmark, a degraded Linux-daemon reference implementation of the same
-MCP surface, and the protocol published as the durable artifact.
+1. **Grow the E1 stimulus set toward N≥20** (RFC E1). Add seeded faults with
+   distinct diagnosis needs (unmapped-address load, misaligned access, a stack
+   overflow, a divide trap) — each a tiny payload fixture — so the surface
+   benchmark is broader. `harness/eval.py::BUGS` is the extension point.
+2. **Full agent-in-the-loop E1.** The current `e1` is a deterministic
+   surface-content proxy (facts-recoverable). The real experiment drives an LLM
+   operator over each surface and measures localization rate/time/tokens; it
+   needs model access, so it belongs in `make eval`/a separate harness, not CI.
+3. **E2 (live-incident MTTR)** needs operator-initiated remediation (kill a
+   payload, set a budget) *while it runs* — which needs preemptive scheduling.
+   The suspend/resume primitive exists (`hal::resume_user`); wiring a real
+   scheduler (save the running frame on preempt, resume another slot) unlocks
+   E2 and a `kill`/`set_budget` control-plane tool (RFC P4's named tools).
+4. **A degraded reference implementation** (a Linux daemon speaking the same
+   `docs/SPEC.md` surface — no true checkpoint/fork, but real) so the eval suite
+   becomes a public benchmark for *both* kernel surfaces and operator agents.
+5. **Remaining evals** E4/E5/E7/E8 as the RFC defines them.
+
+Nothing is known-broken. Any of the above is a fresh, self-contained change;
+start from a green `make test` and keep each milestone's check green.

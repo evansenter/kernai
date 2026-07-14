@@ -7,7 +7,7 @@
 TARGET     := riscv64gc-unknown-none-elf
 KERNEL_ELF := kernel/target/$(TARGET)/release/kernai
 
-.PHONY: build payloads run debug gdb demo test fmt clippy unsafe-budget clean
+.PHONY: build payloads run debug gdb demo eval test fmt clippy unsafe-budget clean
 
 # Payloads build first: the kernel embeds their ELFs via include_bytes!
 # (kernel/build.rs fails loudly if they're missing).
@@ -30,6 +30,12 @@ gdb:
 # Narrated tour of M0-M2 for humans (docs/WALKTHROUGH.md is the readable twin).
 demo: build
 	python3 -m harness.demo
+
+# E1 (M12): score the two diagnostic surfaces against the seeded-fault set and
+# print the scorecard. The `e1` acceptance check (in `make test`) asserts the
+# gap; this target shows it.
+eval: build
+	python3 -m harness.eval
 
 test: unsafe-budget fmt clippy build
 	python3 -m harness.runner all

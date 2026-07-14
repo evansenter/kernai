@@ -19,9 +19,11 @@ a P12 causal parent — and a runtime-toggled `surface-classic` printf twin for
 the E1 A/B (M9); a multi-hop delegation chain proving capabilities only ever
 attenuate, never re-widen, even under a greedy "request everything" at each hop
 (M10, P10); an autonomy dial plus a token-budgeted `digest` resource that
-coalesces the event firehose into a bounded severity-ranked summary (M11, P3).
-See `docs/HANDOFF.md` for the exact next step
-(M12: the E1–E8 evaluation suite).
+coalesces the event firehose into a bounded severity-ranked summary (M11, P3);
+and the E1 evaluation — scoring the two diagnostic surfaces over a seeded-fault
+set (the structured surface recovers 13/13 localization facts, the classic
+printf twin 6/13), plus the published surface spec (M12, `docs/SPEC.md`). The
+**M0–M12 ladder is complete.** `make eval` prints the E1 scorecard.
 
 ## Bootstrap (Ubuntu 24.04 or similar)
 
@@ -51,7 +53,9 @@ make test    # full acceptance suite: framing (M0), boot (M1), traps/timer/fault
              # isolation (M5), checkpoint/fork (M6), deterministic replay (M7),
              # MCP control plane (M8), diagnostic frames + classic twin (M9),
              # delegation attenuation (M10), autonomy + event budgets (M11),
-             # input hardening, determinism, demo — plus unsafe budget; CI runs this
+             # E1 surface eval + E3 cold-handoff (M12), input hardening,
+             # determinism, demo — plus unsafe budget; CI runs this
+make eval    # print the E1 scorecard: diagnostic facts recoverable per surface
 make debug   # boot QEMU halted with a gdb stub on :1234
 make gdb     # attach gdb-multiarch to a running `make debug`
 ```

@@ -768,6 +768,58 @@ def m11_autonomy_and_budgets():
         assert m.result("tools/call", {"name": "set_autonomy", "arguments": {"mode": "reactive"}})["autonomy"] == "reactive"
 
 
+@milestone("e1")
+def e1_diagnostic_sufficiency():
+    """E1 (the RFC headline, surface-content proxy): the structured surface
+    exposes strictly more of the localization facts an operator needs than the
+    classic printf twin — the gap is the root-cause detail (decoded instruction,
+    violated page permission, causal parent, registers) P6 says decides
+    debuggability. Tests the surface, not the agent."""
+    from .eval import run_eval, summarize
+
+    sc = run_eval()
+    a, c, total = summarize(sc)
+    assert a == total, f"structured surface should expose every fact: {a}/{total}"
+    assert c < a, f"classic surface must be strictly poorer: classic {c} vs agentic {a}"
+    for name in sc["agentic"]:
+        ah, _, _ = sc["agentic"][name]
+        ch, _, _ = sc["classic"][name]
+        assert ah > ch, f"{name}: agentic {ah} not strictly > classic {ch}"
+
+
+@milestone("e3")
+def e3_cold_handoff():
+    """E3 seed: a fresh operator reconstructs situational awareness purely from
+    kernel resources (P5/P11/P12) — no prior session, no scrollback, no debugger.
+    After some activity, the spec/processes/digest resources alone say what the
+    kernel is, what ran, and how each payload ended."""
+    from .mcp import Mcp
+    from .qemu import QemuKernel
+
+    with QemuKernel() as q:
+        assert json.loads(q.stream.next_frame(timeout=60))["type"] == "hello"
+        m = Mcp(q)
+        m.result("tools/call", {"name": "run_suite", "arguments": {"suite": "p"}})
+        while True:
+            if json.loads(q.stream.next_frame(timeout=30))["type"] == "suite_done":
+                break
+
+        # A cold reader pulls only resources — it never saw the event stream.
+        spec = m.result("resources/read", {"uri": "spec"})
+        procs = m.result("resources/read", {"uri": "processes"})["processes"]
+        digest = m.result("resources/read", {"uri": "digest", "budget": 4})
+
+        # P5: the self-describing surface says what the kernel IS.
+        assert spec["arch"] == "riscv64"
+        assert {"exit", "write", "spawn"} <= {s["name"] for s in spec["syscalls"]}
+        # P11: the process table says what RAN and how each ended.
+        by = {p["name"]: p for p in procs}
+        assert by["hello"]["state"] == "exited" and by["hello"]["exit_code"] == 0, f"procs: {procs}"
+        assert by["crasher"]["state"] == "faulted", f"procs: {procs}"
+        # P3/P12: the digest says a fault happened, without replaying the stream.
+        assert digest["by_severity"]["error"] >= 1, f"digest lost the fault: {digest}"
+
+
 @milestone("determinism")
 def determinism_two_boots():
     """P9 seed (E6): two input-free boots yield byte-identical event streams."""
