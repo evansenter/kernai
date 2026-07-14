@@ -36,8 +36,9 @@ Boot → `kmain`: hello (event 0), assert kernel image ends below the frame
 pool, **enable Sv39 paging** (kernel identity gigapage; the kernel runs
 translated but transparently), install trap vector, arm timer, enter
 `idle()`. `idle` serves single-byte operator commands (P1 seed): `r` ring
-dump, `x` kernel illegal-instruction, `p`/`m`/`i`/`f` the M3–M6 payload
-suites — and a leading `0xAA` byte switches into the MCP/JSON-RPC request
+dump, `x` kernel illegal-instruction, `p`/`m`/`i`/`f`/`d`/`e` the payload
+suites (M3–M6, M10, and the M12 eval stimulus) — and a leading `0xAA` byte
+switches into the MCP/JSON-RPC request
 reader (`rpc.rs`, M8/P4), the structured control plane the bytes were always a
 stand-in for. The boot event stream stays identical to M2 — payloads only run
 when asked.
@@ -88,7 +89,7 @@ next. Queue drains → `suite_done` → `idle`.
   source.
 - **The serial layer stays dumb**: length-prefix + magic, single-byte commands.
 
-## Attachment points for later principles
+## How each principle is realized (P1–P12 all landed)
 
 - **P4/P5 (MCP, M8, done)**: JSON-RPC 2.0 (MCP method shapes) rides *inside*
   the existing length-prefixed frames — a leading `0xAA` in the operator input
@@ -102,11 +103,10 @@ next. Queue drains → `suite_done` → `idle`.
   idempotent via a client `opId` (an 8-slot FIFO of seen hashes → a replay is
   answered `duplicate`, never re-run). Transport junk is silently dropped and
   resynced (P-serial). Single command bytes remain as a compat/fallback plane.
-- **P6 (M9)**: the payload `fault` frame already carries the page-table walk;
-  M9 grows it further (richer registers, a `cause` parent id — P12) and adds
-  the `surface-classic` printf twin for the E1 A/B.
-- **P7 (now → M9)**: payload output is already tagged `untrusted` and confined
-  to a JSON string; the write quota bounds a hostile payload's context flood.
+- **P7 (done)**: payload output is tagged `untrusted` and confined to a JSON
+  string (`payload_output`), and the per-write byte quota bounds a hostile
+  payload's context flood — the provenance seam that keeps workload bytes from
+  ever being read by the operator as kernel-issued instructions.
 - **P8 (M6, done)**: `sys_snapshot` deep-copies a payload's address space +
   saves its trap frame + CapSet (`mm::deep_copy`, `payload::Snapshot`);
   restore/fork rebuild an independent continuation and `hal::resume_user`
@@ -136,8 +136,8 @@ next. Queue drains → `suite_done` → `idle`.
   *frames* from the wire (still counting them + checking deadlines), leaving the
   digest to pull on demand. Both are `traps.rs` state + `rpc.rs` verbs.
 - **E1/E3/E6 (M12, done)**: `harness/eval.py` scores the two surfaces over a
-  seeded-fault set — the structured surface recovers 13/13 localization facts,
-  the classic printf twin 6/13 (`make eval`; the `e1` check asserts the gap).
+  seeded-fault set — the structured surface recovers 17/17 localization facts,
+  the classic printf twin 8/17 (`make eval`; the `e1` check asserts the gap).
   `e3` reconstructs state from resources alone (cold handoff); `e6` is M7's
   replay. The MCP surface is published as `docs/SPEC.md` v0.1 — the RFC's
   durable artifact. Remaining evals (full agent-loop E1, E2/E4/E5/E7/E8) are

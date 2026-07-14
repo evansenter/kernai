@@ -51,6 +51,7 @@ pub fn kmain(_hartid: usize, _dtb: usize) -> ! {
 ///   'i' → run the M5 isolation suite (out-of-bounds, W^X, kernel-access faults)
 ///   'f' → run the M6 checkpoint suite (snapshot + speculative fork)
 ///   'd' → run the M10 delegation-chain suite (multi-hop attenuation, P10)
+///   'e' → run the E1 stimulus suite (curated seeded faults for the eval, M12)
 ///   0xAA → the start of an MCP/JSON-RPC request frame (M8, P4): the same
 ///          length-prefixed envelope as an outbound event, JSON-RPC inside.
 ///          Single bytes remain the compat/fallback control plane.
@@ -78,6 +79,10 @@ pub fn idle() -> ! {
             }
             Some(b'd') => {
                 payload::seed_suite_m10();
+                payload::run();
+            }
+            Some(b'e') => {
+                payload::seed_suite_eval();
                 payload::run();
             }
             _ => hal::wait_for_interrupt(), // park until the next tick

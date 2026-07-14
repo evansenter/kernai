@@ -98,6 +98,7 @@ static LEAKER: &[u8] = include_bytes!(env!("PAYLOAD_LEAKER"));
 static DELEGATOR: &[u8] = include_bytes!(env!("PAYLOAD_DELEGATOR"));
 static REDELEGATOR: &[u8] = include_bytes!(env!("PAYLOAD_REDELEGATOR"));
 static WORKER: &[u8] = include_bytes!(env!("PAYLOAD_WORKER"));
+static BADJUMP: &[u8] = include_bytes!(env!("PAYLOAD_BADJUMP"));
 
 static IMAGES: &[Image] = &[
     Image {
@@ -190,6 +191,14 @@ static IMAGES: &[Image] = &[
         caps: CAP_WRITE,
         deadline: 0,
     },
+    // badjump: jumps to an unmapped instruction address → instruction page
+    // fault (E1 stimulus: a fetch-side fault distinct from the data faults).
+    Image {
+        name: "badjump",
+        elf: BADJUMP,
+        caps: CAP_WRITE,
+        deadline: 0,
+    },
 ];
 
 const IMG_HELLO: usize = 0;
@@ -205,6 +214,7 @@ const IMG_LEAKER: usize = 9;
 const IMG_DELEGATOR: usize = 10;
 const IMG_REDELEGATOR: usize = 11;
 const IMG_WORKER: usize = 12;
+const IMG_BADJUMP: usize = 13;
 
 /// Map a payload-supplied spawn selector (stable ABI, see payloads/sys) to an
 /// image index. Only images a payload is allowed to spawn appear here.
@@ -388,6 +398,23 @@ pub fn seed_suite_m6() {
 pub fn seed_suite_m10() {
     clear_table();
     enqueue(IMG_DELEGATOR, IMAGES[IMG_DELEGATOR].caps, NO_PID);
+}
+
+/// E1 stimulus suite (operator-triggered by 'e'): the curated seeded-fault set
+/// for the diagnostic-surface evaluation (M12). Four distinct fault modes so
+/// the surface benchmark spans more than one kind of bug:
+///   crasher → illegal instruction (a privileged CSR write)
+///   wild    → load page fault    (reading kernel memory)
+///   wxviol  → store page fault   (writing an executable page, W^X)
+///   badjump → instruction page fault (fetching from an unmapped address)
+/// Kept separate from the milestone suites so the stimulus set can grow
+/// (toward the RFC's N≥20) without perturbing any acceptance check.
+pub fn seed_suite_eval() {
+    clear_table();
+    enqueue(IMG_CRASHER, IMAGES[IMG_CRASHER].caps, NO_PID);
+    enqueue(IMG_WILD, IMAGES[IMG_WILD].caps, NO_PID);
+    enqueue(IMG_WXVIOL, IMAGES[IMG_WXVIOL].caps, NO_PID);
+    enqueue(IMG_BADJUMP, IMAGES[IMG_BADJUMP].caps, NO_PID);
 }
 
 fn enqueue(image: usize, caps: u32, parent: usize) -> Option<usize> {

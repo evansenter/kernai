@@ -15,6 +15,7 @@ members = [
     "delegator",
     "redelegator",
     "worker",
+    "badjump",
 ]
 
 [profile.release]

@@ -23,6 +23,7 @@ fn main() {
         "delegator",
         "redelegator",
         "worker",
+        "badjump",
     ] {
         let path = format!("{payload_dir}/{name}");
         if !Path::new(&path).exists() {

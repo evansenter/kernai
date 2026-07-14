@@ -142,6 +142,7 @@ fn handle_tools_call(json: &str, id: &str) {
                 "i" | "m5" => payload::seed_suite_m5,
                 "f" | "m6" => payload::seed_suite_m6,
                 "d" | "m10" => payload::seed_suite_m10,
+                "e" | "eval" => payload::seed_suite_eval,
                 _ => return respond_error(id, -32602, "unknown suite"),
             };
             if let Some(op) = op {

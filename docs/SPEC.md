@@ -98,7 +98,7 @@ Errors use `"error":{"code":,"message":}` (JSON-RPC codes: -32600 invalid,
 
 | tool | arguments | effect |
 |------|-----------|--------|
-| `run_suite` | `{suite: p\|m\|i\|f\|d}` | run a workload suite; async — returns `{status:"accepted"}`, events stream, `suite_done` is completion |
+| `run_suite` | `{suite: p\|m\|i\|f\|d\|e}` | run a workload suite; async — returns `{status:"accepted"}`, events stream, `suite_done` is completion |
 | `crash` | — | deliberate kernel fault → shutdown |
 | `ring_read` | — | the trap ring as a result |
 | `set_surface` | `{mode: agentic\|classic}` | select the diagnostic surface (§5, P6/E1) |

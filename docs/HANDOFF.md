@@ -48,8 +48,8 @@ budget first):
     the `set_autonomy` dial suppresses trace-severity tick frames at autonomous
     while still counting them (and checking deadlines)
 14. `e1` — the RFC headline (surface-content proxy): over the seeded-fault set,
-    the structured surface recovers every localization fact (13/13) and the
-    classic printf twin far fewer (6/13) — the gap is the root-cause detail P6
+    the structured surface recovers every localization fact (17/17) and the
+    classic printf twin far fewer (8/17) — the gap is the root-cause detail P6
     says decides debuggability (`make eval` prints the scorecard)
 15. `e3` — cold handoff: a fresh reader reconstructs state from the
     spec/processes/digest resources alone (P5/P11/P12)
@@ -91,7 +91,7 @@ M3–M6/M10 suites. Or drive it structured: a `0xAA`-led length-prefixed frame
 carrying JSON-RPC (MCP) — `initialize`, `tools/list`, `tools/call {run_suite|
 crash|ring_read|set_surface|set_autonomy}`, `resources/list`, `resources/read
 {trap_ring|processes|spec|surface|autonomy|digest}`. `run_suite` takes
-`{suite: p|m|i|f|d}`; `digest` takes `{budget: N}`. See `harness/mcp.py` for the
+`{suite: p|m|i|f|d|e}`; `digest` takes `{budget: N}`. See `harness/mcp.py` for the
 client and `runner.py::m8`…`m11` for full sessions.
 
 ## Known-broken / caveats

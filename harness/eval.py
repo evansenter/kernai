@@ -88,10 +88,27 @@ BUGS = {
              lambda ln: False),
         ],
     },
+    "badjump": {  # instruction page fault: fetching from an unmapped address
+        "cause_name": "instruction_page_fault",
+        "facts": [
+            ("cause classified",
+             lambda f: f.get("cause_name") == "instruction_page_fault",
+             lambda ln: "instruction_page_fault" in ln),
+            ("faulting PC",
+             lambda f: _has(f, "sepc"),
+             lambda ln: "pc=0x" in ln),
+            ("no mapping (root cause: page not present, v=0)",
+             lambda f: any(e.get("v") == 0 for e in (f.get("pagewalk") or [])),
+             lambda ln: False),
+            ("causal parent (which run)",
+             lambda f: _has(f, "caused_by") and _has(f, "pid"),
+             lambda ln: False),
+        ],
+    },
 }
 
-# Which suite runs each fault (p → crasher; i → wild, wxviol).
-SUITES = ["p", "i"]
+# One curated suite runs the whole stimulus set (kernel-side `seed_suite_eval`).
+SUITES = ["e"]
 
 
 def _collect(q, mcp, classic):

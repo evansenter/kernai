@@ -4,8 +4,8 @@ An agent-native RISC-V unikernel. See `docs/RFC-001-agent-native-kernel.md` for
 the thesis and `CLAUDE.md` for working conventions. New here — or new to
 kernels entirely? Start with `docs/WALKTHROUGH.md`, then run `make demo`.
 
-Current state: **M9** — boot, traps, SBI timer, trap ring, structured fault
-reports (M0–M2); U-mode payloads running to `sys_exit`, a payload crash kills
+Current state: **M12 (ladder complete)** — boot, traps, SBI timer, trap ring,
+structured fault reports (M0–M2); U-mode payloads running to `sys_exit`, a payload crash kills
 only the payload (M3); a capability-gated syscall surface with spawn
 attenuation and instruction-count deadline kill (M4); per-payload Sv39 paging
 giving real memory isolation and W^X, with page-table walks in fault reports
@@ -21,8 +21,8 @@ attenuate, never re-widen, even under a greedy "request everything" at each hop
 (M10, P10); an autonomy dial plus a token-budgeted `digest` resource that
 coalesces the event firehose into a bounded severity-ranked summary (M11, P3);
 and the E1 evaluation — scoring the two diagnostic surfaces over a seeded-fault
-set (the structured surface recovers 13/13 localization facts, the classic
-printf twin 6/13), plus the published surface spec (M12, `docs/SPEC.md`). The
+set (the structured surface recovers 17/17 localization facts, the classic
+printf twin 8/17), plus the published surface spec (M12, `docs/SPEC.md`). The
 **M0–M12 ladder is complete.** `make eval` prints the E1 scorecard.
 
 ## Bootstrap (Ubuntu 24.04 or similar)
