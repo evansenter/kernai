@@ -61,7 +61,7 @@ machine-readable JSON events instead of human log lines — because its
 intended operator is an AI agent, not a person at a terminal.
 """)
 
-    say("[1/8] Booting an emulated RISC-V computer...")
+    say("[1/9] Booting an emulated RISC-V computer...")
     note("""
 QEMU emulates the whole machine: CPU, memory, a serial port (think: a wire
 for bytes). A small piece of firmware called OpenSBI (the machine's
@@ -78,7 +78,7 @@ Every event is JSON with a globally increasing "id". The hello frame is the
 kernel saying "I'm alive, I speak protocol 0".
 """)
 
-        say("[2/8] Watching the kernel's heartbeat (timer interrupts)...")
+        say("[2/9] Watching the kernel's heartbeat (timer interrupts)...")
         note("""
 The kernel asked the hardware for a timer that fires every 10,000 timebase
 units — under deterministic emulation that is exactly every 500,000 CPU
@@ -95,7 +95,7 @@ tick event.
 increase in lockstep — the event stream is the kernel's diary.
 """)
 
-        say("[3/8] Asking the kernel what happened recently (introspection)...")
+        say("[3/9] Asking the kernel what happened recently (introspection)...")
         note("""
 Classic kernels keep their internal state hidden — you attach a debugger to
 see it. This kernel's design principle P11 says: no state observable only
@@ -112,7 +112,7 @@ CPU was interrupted. This is the seed of the kernel-as-queryable-database
 idea the whole project is built around.
 """)
 
-        say("[4/8] Running a user program under the kernel...")
+        say("[4/9] Running a user program under the kernel...")
         note("""
 So far everything has been the kernel itself. Now we send 'p' to load two
 small *user* programs — separate compiled binaries — and run them in
@@ -152,7 +152,7 @@ user program crashing is an event, not a catastrophe (principle P1).
         show(get(q, "suite_done"))
         note('suite_done: one program exited cleanly, one faulted. The kernel is fine.')
 
-        say("[5/8] The sandbox: capabilities, delegation, and runaway control...")
+        say("[5/9] The sandbox: capabilities, delegation, and runaway control...")
         note("""
 Send 'm' for four more programs that show the kernel enforcing policy:
   • a "muzzled" program with NO capabilities tries to print — denied
@@ -198,7 +198,7 @@ machine by spinning. Because time here is measured in instructions, not
 the wall clock, this kill happens at the EXACT same point every single run.
 """)
 
-        say("[6/8] Memory isolation: each program gets its own private memory...")
+        say("[6/9] Memory isolation: each program gets its own private memory...")
         note("""
 Send 'i'. Until now, nothing physically stopped a user program from reaching
 into the kernel's memory — there was no memory management unit (MMU) turned
@@ -238,7 +238,50 @@ faults killed only the offending program; the kernel ran a clean program
 right after, in its own fresh address space.
 """)
 
-        say("[7/8] Deliberately crashing the kernel itself (the good part)...")
+        say("[7/9] Checkpoint and fork: saving and branching a running program...")
+        note("""
+Send 'f'. A program called "forker" prints a line, then asks the kernel to
+*checkpoint* it — freeze its entire state (memory + registers). It keeps
+running (the "original" branch) and exits. Then the kernel does something a
+normal OS can't do cheaply: it *forks* that checkpoint into two brand-new
+programs, each resuming from the frozen point — like save-scumming a video
+game, or exploring two futures from one decision.
+""")
+        q.send(b"f")
+        chk = []
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            e = q.next_event(30)
+            assert e is not None, "kernel exited during M6 suite"
+            if e["type"] == "tick":
+                continue
+            chk.append(e)
+            if e["type"] == "suite_done":
+                break
+        show(next(e for e in chk if e["type"] == "snapshot"))
+        note("""
+"snapshot": the kernel deep-copied the program's private memory and saved its
+registers. Now watch the outputs. The line "before the checkpoint" was
+printed once — by the original, before the snapshot. Each forked continuation
+resumes AFTER that point, so it never reprints it:
+""")
+        for o in chk:
+            if o["type"] == "payload_output":
+                tag = "restored" if any(
+                    s["pid"] == o["pid"] and s.get("restored")
+                    for s in chk if s["type"] == "payload_start") else "original"
+                show({"pid": o["pid"], "branch": tag, "data": o["data"]})
+        note("""
+Two independent continuations (pid 1 and pid 2) each resumed from the exact
+checkpoint and ran the post-snapshot code — but "before the checkpoint"
+appears only once. The snapshot call returned a non-zero id to the original
+and zero to each fork, so a program can tell which future it's in (exactly
+like Unix fork()). This is the substrate for an agent doing tree search:
+check point, try a branch, and if it's bad, fork the checkpoint again and
+try another. It's cheap here because a unikernel owns the whole memory map.
+""")
+
+        say("[8/9] Deliberately crashing the kernel itself (the good part)...")
         note("""
 Now we send 'x', which tells the kernel to execute an instruction that is
 forbidden by the CPU spec: writing to the read-only 'cycle' counter
@@ -266,7 +309,7 @@ Reading it like the kernel does:
         except subprocess.TimeoutExpired:
             raise AssertionError("kernel hung after fault report")
 
-    say("[8/8] Proving determinism (run it again, get identical bytes)...")
+    say("[9/9] Proving determinism (run it again, get identical bytes)...")
     note("""
 The emulator is configured so virtual time is computed from the instruction
 count (-icount), not the host clock. Same program + same inputs = the same

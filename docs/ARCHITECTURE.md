@@ -1,4 +1,4 @@
-# Architecture (current: M5)
+# Architecture (current: M6)
 
 One page, always accurate. Principles P1–P12 are defined in
 `RFC-001-agent-native-kernel.md`. Beginner-level narrative: `WALKTHROUGH.md`.
@@ -90,7 +90,12 @@ next. Queue drains → `suite_done` → `idle`.
   the `surface-classic` printf twin for the E1 A/B.
 - **P7 (now → M9)**: payload output is already tagged `untrusted` and confined
   to a JSON string; the write quota bounds a hostile payload's context flood.
-- **P8 (M6, next)**: a payload's whole state is now its page table + trap
-  frame + CapSet, so `snapshot`/`restore`/`fork_from` become a walk-and-copy
-  of the address space plus the saved frame. The full-frame suspend/resume
-  switch that concurrent scheduling needs lands here too.
+- **P8 (M6, done)**: `sys_snapshot` deep-copies a payload's address space +
+  saves its trap frame + CapSet (`mm::deep_copy`, `payload::Snapshot`);
+  restore/fork rebuild an independent continuation and `hal::resume_user`
+  (a full-frame trampoline) resumes it. snapshot returns a positive id in the
+  original and 0 in each continuation (fork()-style). `resume_user` is also
+  the suspend/resume primitive real scheduling will use.
+- **P9/E6 (M7, next)**: extend the byte-identical determinism guarantee to
+  recorded *operator input*, with a replay mode that re-feeds a session and
+  diffs the event stream. Mostly harness work + an `input` event.

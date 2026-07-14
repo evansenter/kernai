@@ -278,3 +278,34 @@ non-writable stack that only trivial payloads survived). Fixed with explicit
 PHDRS (text R+X, rodata R, data R+W) plus bare `. = ALIGN(0x1000)` statements
 between segments, so every segment starts on its own page with correct W^X
 permissions. The loader relies on this (one page is never mapped twice).
+
+**2026-07-14 · M6 · PROVISIONAL · Checkpoint = deep-copy of the address space + saved trap frame + CapSet; blobs stay in-kernel (not host-serialized) for now.**
+snapshot(pid) deep-copies the payload's Sv39 address space into independent
+frames, saves its trap frame (the register file, captured at the sys_snapshot
+ecall), and its CapSet into an in-kernel Snapshot table. restore/fork deep-copy
+the snapshot again so continuations never share frames. The RFC's blob-to-host
+serialization (postcard/CBOR, P5) is deferred — M6 proves the mechanism
+(snapshot/restore/fork as primitives) in-kernel; the wire format lands with the
+MCP layer (M8) where snapshot/restore become control-plane verbs returning
+handles. fork()-style semantics: snapshot returns a positive id in the original
+and 0 in each continuation, so a payload can branch (the what-if verb).
+
+**2026-07-14 · M6 · enter_user unified onto __resume_user (full-frame resume); fresh starts scrub registers.**
+Previously enter_user set sepc + a few CSRs and sret'd, leaving the general
+registers holding kernel scheduler values (M5-audit LOW: cross-boundary leak).
+M6 needs full-frame resume for restore anyway (a global_asm __resume_user that
+loads all 31 GPRs + sepc + sstatus from a frame), so fresh starts now build a
+ZEROED frame (sepc=entry, U-mode sstatus) and resume through the same path —
+every GPR is loaded as 0, scrubbing the register file for free. Bonus: moving
+the register loads into global_asm dropped the inline-unsafe budget from 71 to
+55/200.
+
+**2026-07-14 · M6 · Confused-deputy fix (M5-audit HIGH): kernel-on-behalf-of-user memory access enforces the U bit.**
+The write syscall copied user bytes via a permission-agnostic translate(), so a
+payload could hand the kernel a pointer into the kernel gigapage (U=0) or the
+frame pool and have the kernel read it and emit it as output — an isolation
+break the direct-access `wild` fixture never caught (that faults in hardware;
+this used the kernel as a deputy). Fixed: translate_checked requires the leaf
+to be user-accessible (U) plus the needed R/W bits before the kernel
+dereferences a user pointer. The `leaker` fixture (write() of 0x80200000)
+regression-tests it: the write is refused (EFAULT), no bytes leak.

@@ -5,7 +5,7 @@ beyond this repo (we dogfood E3 on ourselves).
 
 ## Current state (2026-07-14, session 2)
 
-**M0–M5 complete and green.** `make test` from a fresh clone runs nine
+**M0–M6 complete and green.** `make test` from a fresh clone runs ten
 checks in a few seconds:
 
 1. `m0` — framing round-trips over a real pipe (loopback stub)
@@ -19,23 +19,27 @@ checks in a few seconds:
    with attenuation (`granted ⊆ parent`, P10), instruction-count deadline
    kill of a runaway (`payload_killed`), post-suite liveness
 6. `m5` — per-payload Sv39 paging: a payload reading kernel memory faults
-   (isolation), a payload writing its own code faults (W^X), each fault
-   frame carries the page-table walk, kernel survives both
-7. `hardening` — 200 ticks contiguous under garbage serial input
-8. `determinism` — two input-free boots byte-identical (P9 / E6 seed)
-9. `demo` — the narrated `make demo` completes
+   (isolation), a payload writing its own code faults (W^X), a `leaker`
+   handing the kernel a kernel pointer via write() is refused (confused-
+   deputy defense), each fault frame carries the page-table walk
+7. `m6` — checkpoint/restore/fork (P8): a payload checkpoints itself
+   mid-run; the kernel forks that checkpoint into independent continuations
+   that each resume from the checkpoint point, not the top
+8. `hardening` — 200 ticks contiguous under garbage serial input
+9. `determinism` — two input-free boots byte-identical (P9 / E6 seed)
+10. `demo` — the narrated `make demo` completes
 
 CI (`.github/workflows/ci.yml`) runs the same gate + `ci/unsafe_budget.sh`
-on every push. **Unsafe budget: 71/200 lines in 4/4 hal files** — the file
+on every push. **Unsafe budget: 55/200 lines in 4/4 hal files** — the file
 cap is fully used; new hal code must extend `hal/csr.rs` / `hal/boot.rs` /
 `hal/trap.rs`, never add a 5th unsafe file.
 
-M3+M4 were adversarially audited by five parallel reviewers; the one HIGH
-(an `sscratch` desync race in `enter_user`) and several LOW findings were
-fixed. M5 (paging) is new this session and has NOT yet had a dedicated
-adversarial audit — that is a priority follow-up (the page-table code, the
-satp-switch window in `enter_user`, and the frame reaper are the sensitive
-spots).
+Audits so far: M3+M4 (five reviewers) fixed one HIGH (`sscratch` desync) +
+LOWs. M5 paging (five reviewers) fixed one HIGH (a confused-deputy leak in
+the write syscall — the kernel would follow a payload's kernel pointer) and
+one LOW (register scrub), both in the M6 commit. **M6 (checkpoint) is new and
+not yet audited** — the deep-copy walk, __resume_user frame layout, and
+snapshot/reap lifecycle are the spots to scrutinize next.
 
 Toolchain: nightly-2026-07-14 (rust-toolchain.toml), QEMU 8.2.2
 (`qemu-system-misc`), gdb-multiarch 15.1. `make build` builds the payload
@@ -44,18 +48,18 @@ workspace first (the kernel embeds their ELFs), then the kernel.
 ## What the operator can do (single serial command bytes)
 
 `r` dump trap ring · `x` crash the kernel (illegal instr → shutdown) ·
-`p` M3 payload suite · `m` M4 sandbox suite · `i` M5 isolation suite.
+`p` M3 payload suite · `m` M4 sandbox suite · `i` M5 isolation suite ·
+`f` M6 checkpoint/fork suite.
 
 ## Known-broken / caveats
 
 - Nothing known-broken.
 - Payloads still run sequentially (run-to-completion); `yield` is a no-op
-  reschedule and `spawn`'d children run after the parent. Address spaces are
-  isolated now, but concurrent scheduling waits for the full-frame
-  suspend/resume switch that M6's checkpoint machinery builds.
-- `enter_user` does not scrub the register file, so a fresh payload could
-  read a stale kernel register value. Low risk (no secrets yet); scrub when
-  M8/M9 add sensitive state.
+  reschedule and `spawn`'d children run after the parent. The full-frame
+  suspend/resume switch now EXISTS (`hal::resume_user`, used by M6 restore),
+  so real cooperative/preemptive scheduling is a small follow-up: save the
+  running payload's frame on yield/preempt and resume another slot. Not wired
+  yet because no milestone required it.
 - Deadlines are in timebase units (deterministic instruction proxy under
   -icount), not exact retired-instruction counts — see DECISIONS.md.
 - The budget script's SAFETY-comment walk is looser than clippy's; clippy's
@@ -63,24 +67,24 @@ workspace first (the kernel embeds their ELFs), then the kernel.
 
 ## Exact next step
 
-**M6: checkpoint/restore + speculative fork (P8).** Per the RFC ladder. The
-per-payload address space (M5) makes this tractable — the whole state is the
-page table + the trap frame + the CapSet.
+**M7: deterministic replay green in CI (E6).** Per the RFC ladder. The kernel
+is already deterministic under -icount (the `determinism` check proves two
+input-free boots are byte-identical). M7 extends that to *operator input*:
 
-1. `snapshot(pid) -> blob`: serialize a payload's address space (walk its
-   page table, copy each user frame + its VA/perms), register file (the saved
-   trap frame), and CapSet into a versioned blob. A payload is snapshottable
-   only when parked at a syscall boundary (its frame is saved) — add a
-   `sys_checkpoint` or an operator command that parks it.
-2. `restore(blob) -> pid`: allocate a fresh address space, re-map the frames
-   from the blob, install the register file, resume.
-3. `fork_from(blob)`: restore into a NEW pid so two continuations can run
-   from the same checkpoint (the what-if verb, RFC demo 2).
-4. Acceptance: snapshot a payload mid-run, restore it, and the restored
-   payload produces the identical continuation (byte-identical events under
-   -icount); fork produces two independent pids.
+1. Record: every control-plane input (the command bytes r/x/p/m/i/f, and
+   later MCP requests) is logged with the icount/timebase at which it was
+   consumed. The harness already sends these; capture them host-side with the
+   guest's `time` for each, or have the kernel echo an `input` event.
+2. Replay mode: a harness runner that re-feeds the recorded inputs and
+   asserts the event stream is byte-identical to the recording — including
+   the payload suites (which today aren't in the determinism check because
+   command timing is host-paced). The subtlety: input delivery must be tied
+   to instruction count, not wall clock, so replays line up. Options: drive
+   input at deterministic icount points via the gdb stub, or make the kernel
+   poll input only at fixed tick boundaries so delivery is quantized.
+3. Acceptance (E6): record a full session (e.g. boot + `f` suite), replay it,
+   diff the two event streams — must be identical. Add to `make test`.
 
-Blob format: postcard/CBOR would be self-describing (P5) but adds a
-dependency; a raw versioned header keeps zero-dep. Decide and log.
-Before starting: M5 deserves a dedicated adversarial audit first (page-table
-code, satp window, frame reaper) — do that, then M6.
+This is mostly harness work + a small kernel `input` event; no new unsafe.
+Before starting: **M6 deserves a dedicated adversarial audit** (deep-copy
+walk, __resume_user, snapshot/reap lifecycle) — do that first.

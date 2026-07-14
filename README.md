@@ -4,12 +4,14 @@ An agent-native RISC-V unikernel. See `docs/RFC-001-agent-native-kernel.md` for
 the thesis and `CLAUDE.md` for working conventions. New here — or new to
 kernels entirely? Start with `docs/WALKTHROUGH.md`, then run `make demo`.
 
-Current state: **M5** — boot, traps, SBI timer, trap ring, structured fault
+Current state: **M6** — boot, traps, SBI timer, trap ring, structured fault
 reports (M0–M2); U-mode payloads running to `sys_exit`, a payload crash kills
 only the payload (M3); a capability-gated syscall surface with spawn
 attenuation and instruction-count deadline kill (M4); per-payload Sv39 paging
 giving real memory isolation and W^X, with page-table walks in fault reports
-(M5). See `docs/HANDOFF.md` for the exact next step (M6: checkpoint/restore).
+(M5); checkpoint/restore and speculative fork — a payload checkpoints itself
+and the kernel forks independent continuations (M6, P8). See `docs/HANDOFF.md`
+for the exact next step (M7: deterministic replay).
 
 ## Bootstrap (Ubuntu 24.04 or similar)
 
