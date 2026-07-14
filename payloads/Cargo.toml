@@ -10,6 +10,8 @@ members = [
     "runaway",
     "wild",
     "wxviol",
+    "forker",
+    "leaker",
 ]
 
 [profile.release]

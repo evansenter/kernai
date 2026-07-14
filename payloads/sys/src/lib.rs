@@ -30,6 +30,7 @@ pub const SYS_EXIT: usize = 0;
 pub const SYS_WRITE: usize = 1;
 pub const SYS_YIELD: usize = 2;
 pub const SYS_SPAWN: usize = 3;
+pub const SYS_SNAPSHOT: usize = 4;
 
 // Capability bits (must match kernel/src/payload.rs).
 pub const CAP_WRITE: usize = 1 << 0;
@@ -66,6 +67,12 @@ pub fn write(bytes: &[u8]) -> isize {
     syscall(SYS_WRITE, bytes.as_ptr() as usize, bytes.len(), 0)
 }
 
+/// write() with a raw pointer/length — used by the isolation fixture to hand
+/// the kernel a pointer it shouldn't follow (confused-deputy test).
+pub fn write_raw(ptr: usize, len: usize) -> isize {
+    syscall(SYS_WRITE, ptr, len, 0)
+}
+
 pub fn yield_now() -> isize {
     syscall(SYS_YIELD, 0, 0, 0)
 }
@@ -75,6 +82,14 @@ pub fn yield_now() -> isize {
 /// the child pid, or a negative errno.
 pub fn spawn(image: usize, caps: usize) -> isize {
     syscall(SYS_SPAWN, image, caps, 0)
+}
+
+/// Checkpoint the calling payload (P8). Returns a positive snapshot id in the
+/// original run, and 0 in each restored/forked continuation — the fork()-style
+/// distinction that lets a what-if continuation know which branch it is.
+/// Negative on error.
+pub fn snapshot() -> isize {
+    syscall(SYS_SNAPSHOT, 0, 0, 0)
 }
 
 #[panic_handler]

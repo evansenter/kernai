@@ -206,6 +206,28 @@ fn redirect_to_scheduler(frame: &mut TrapFrame) {
     frame.set_sp(hal::boot_stack_top() as u64);
 }
 
+/// Serialize `frame` into a zeroed pool frame at `pa` in the trap vector's
+/// layout (x_n at (n-1)*8, sepc @248, sstatus @256), overriding a0. Used by
+/// M6 snapshot: the saved copy resumes past the `ecall`, and `a0` lets a
+/// restored continuation see 0 while the original saw the snapshot id.
+pub fn save_frame_to(frame: &TrapFrame, pa: usize, a0: u64) {
+    for (i, &r) in frame.regs.iter().enumerate() {
+        hal::phys_write_u64(pa + i * 8, r);
+    }
+    hal::phys_write_u64(pa + X_A0 * 8, a0);
+    hal::phys_write_u64(pa + 248, frame.sepc);
+    hal::phys_write_u64(pa + 256, frame.sstatus);
+}
+
+/// Initialize a zeroed pool frame `pa` as a fresh-start trap frame for a
+/// payload: all GPRs zero (so no kernel register value leaks across the
+/// privilege boundary), sepc = `entry`, sstatus = SPIE (interrupts on after
+/// sret, SPP=0 = U-mode). `pa` must be a freshly zeroed frame.
+pub fn init_frame_to(pa: usize, entry: usize) {
+    hal::phys_write_u64(pa + 248, entry as u64);
+    hal::phys_write_u64(pa + 256, SSTATUS_SPIE); // SPP=0, SPIE=1
+}
+
 fn cause_name(scause: u64) -> &'static str {
     match scause {
         0 => "instruction_address_misaligned",

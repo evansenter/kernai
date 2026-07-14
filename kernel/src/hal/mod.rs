@@ -20,4 +20,4 @@ pub use csr::{
     without_interrupts, write_satp,
 };
 pub use sbi::{console_getchar, console_putchar, set_timer, shutdown};
-pub use trap::{enter_user, init as traps_init, trigger_illegal_instruction};
+pub use trap::{init as traps_init, resume_user, trigger_illegal_instruction};

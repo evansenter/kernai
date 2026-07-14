@@ -48,6 +48,7 @@ pub fn kmain(_hartid: usize, _dtb: usize) -> ! {
 ///   'p' → run the M3 payload suite (clean payload + a crash)
 ///   'm' → run the M4 payload suite (caps, spawn attenuation, deadline kill)
 ///   'i' → run the M5 isolation suite (out-of-bounds, W^X, kernel-access faults)
+///   'f' → run the M6 checkpoint suite (snapshot + speculative fork)
 pub fn idle() -> ! {
     loop {
         match hal::console_getchar() {
@@ -63,6 +64,10 @@ pub fn idle() -> ! {
             }
             Some(b'i') => {
                 payload::seed_suite_m5();
+                payload::run();
+            }
+            Some(b'f') => {
+                payload::seed_suite_m6();
                 payload::run();
             }
             _ => hal::wait_for_interrupt(), // park until the next tick

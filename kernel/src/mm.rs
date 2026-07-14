@@ -111,8 +111,19 @@ impl AddressSpace {
         Ok(())
     }
 
-    /// Translate a user VA to a physical address, if mapped.
+    /// Translate a user VA to a physical address, if mapped (permission-
+    /// agnostic; for internal walks only — never for a user pointer).
     pub fn translate(&self, va: usize) -> Option<usize> {
+        self.translate_checked(va, 0)
+    }
+
+    /// Translate a user VA that the kernel will access ON THE PAYLOAD'S
+    /// BEHALF, requiring the leaf to be user-accessible (U) plus whatever
+    /// `need` bits (R/W) the access wants. This is the confused-deputy
+    /// defense: a payload cannot hand the kernel a pointer into the kernel
+    /// gigapage (U=0) — or any page it couldn't reach itself — and have the
+    /// kernel read/write it. Returns the physical address only if allowed.
+    fn translate_checked(&self, va: usize, need: u64) -> Option<usize> {
         let mut table = self.root;
         for level in [2usize, 1usize, 0usize] {
             let pte = read_pte(table + vpn(va, level) * 8);
@@ -120,7 +131,11 @@ impl AddressSpace {
                 return None;
             }
             if pte & PERM_MASK != 0 {
-                // leaf at this level: combine with the in-page offset
+                // leaf: enforce the requested permissions (need == 0 for the
+                // permission-agnostic internal translate()).
+                if need != 0 && (pte & U == 0 || pte & need != need) {
+                    return None;
+                }
                 let page = 1usize << (12 + 9 * level);
                 return Some(pte_pa(pte) + (va & (page - 1)));
             }
@@ -130,12 +145,13 @@ impl AddressSpace {
     }
 
     /// Copy `len` bytes from user VA `va` into `buf` (for the write syscall).
-    /// Walks page by page; false if any page is unmapped.
+    /// Every page must be user-readable (U+R) — a pointer the payload could
+    /// not itself read is rejected (EFAULT), never followed into kernel RAM.
     pub fn copy_from_user(&self, va: usize, buf: &mut [u8]) -> bool {
         let mut done = 0;
         while done < buf.len() {
             let cur = va + done;
-            let pa = match self.translate(cur) {
+            let pa = match self.translate_checked(cur, U | R) {
                 Some(pa) => pa,
                 None => return false,
             };
@@ -164,6 +180,71 @@ impl AddressSpace {
             table = pte_pa(pte);
         }
         chain
+    }
+
+    /// Deep-copy this address space into a brand-new one (M6 snapshot/fork):
+    /// a fresh kernel gigapage plus an independent copy of every user page
+    /// (new frames, contents copied). The result shares no user frame with
+    /// the original, so the two can diverge. None on frame exhaustion (any
+    /// partial copy is freed).
+    pub fn deep_copy(&self) -> Option<AddressSpace> {
+        let dst = AddressSpace::new()?;
+        if map_kernel(&dst).is_err() {
+            dst.destroy();
+            return None;
+        }
+        // User mappings live under the root subtree (low VAs). Walk every
+        // 4 KiB user leaf and clone it.
+        if !self.copy_user_pages(&dst, self.root, 2, 0) {
+            dst.destroy();
+            return None;
+        }
+        Some(dst)
+    }
+
+    /// Walk `table` at `level`, copying each user 4 KiB leaf into `dst` at the
+    /// accumulated VA. Returns false on frame exhaustion.
+    fn copy_user_pages(
+        &self,
+        dst: &AddressSpace,
+        table: usize,
+        level: usize,
+        va_base: usize,
+    ) -> bool {
+        for i in 0..512 {
+            let pte = read_pte(table + i * 8);
+            if pte & V == 0 {
+                continue;
+            }
+            let va = va_base + (i << (12 + 9 * level));
+            if pte & PERM_MASK != 0 {
+                // A leaf. Only copy user pages; skip supervisor (kernel) leaves.
+                if pte & U == 0 {
+                    continue;
+                }
+                let src_frame = pte_pa(pte);
+                let new_frame = match frames::alloc() {
+                    Some(f) => f,
+                    None => return false,
+                };
+                let mut buf = [0u8; PAGE_SIZE];
+                if !hal::phys_read(src_frame, &mut buf) || !hal::phys_write(new_frame, &buf) {
+                    frames::free(new_frame);
+                    return false;
+                }
+                let perms = pte & (R | W | X | U);
+                if dst.map_page(va, new_frame, perms).is_err() {
+                    frames::free(new_frame);
+                    return false;
+                }
+            } else if level > 0 {
+                // Interior node: recurse.
+                if !self.copy_user_pages(dst, pte_pa(pte), level - 1, va) {
+                    return false;
+                }
+            }
+        }
+        true
     }
 
     /// Free every user frame and intermediate table this space owns, then the

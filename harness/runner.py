@@ -241,6 +241,9 @@ def m5_memory_isolation():
         q.send(b"i")
         done = _await(q, "suite_done", seen)
 
+        by_type = {}
+        for e in seen:
+            by_type.setdefault(e["type"], []).append(e)
         faults = [e for e in seen if e["type"] == "fault"]
         by_pid = {e["pid"]: e for e in faults}
 
@@ -261,15 +264,82 @@ def m5_memory_isolation():
         leaf = wx["pagewalk"][-1]
         assert leaf["x"] == 1 and leaf["w"] == 0, f"W^X not enforced on text page: {leaf}"
 
-        # A clean payload ran last and exited — the kernel survived both faults.
+        # leaker (pid 2): confused-deputy defense. It handed the kernel a
+        # kernel pointer via write(); the kernel refused (EFAULT), so no
+        # bytes leaked and it exited 9. It must have produced NO output.
+        leaker = next(e for e in by_type["payload_start"] if e["name"] == "leaker")
+        assert not any(o["pid"] == leaker["pid"] for o in by_type.get("payload_output", [])), \
+            "leaker produced output — the kernel followed a kernel pointer (confused deputy!)"
+        assert any(x["pid"] == leaker["pid"] and x["code"] == 9 for x in by_type["payload_exit"]), \
+            "leaker's write into kernel memory was not refused"
+
+        # A clean payload ran last and exited — the kernel survived everything.
         assert any(e["type"] == "payload_exit" and e["code"] == 0 for e in seen), \
             "clean payload did not run after the isolation faults"
-        assert done["exited"] == 1 and done["faulted"] == 2, f"unexpected suite result: {done}"
+        assert done["exited"] == 2 and done["faulted"] == 2, f"unexpected suite result: {done}"
 
         # Liveness after two page faults.
         q.send(b"r")
         ring = _await(q, "trap_ring", seen)
         assert ring["count"] >= 4, f"kernel unresponsive after isolation suite: {ring}"
+
+
+@milestone("m6")
+def m6_checkpoint_fork():
+    """Checkpoint/restore/fork (P8): a payload checkpoints itself mid-run; the
+    kernel forks that checkpoint into independent continuations that each
+    resume from the checkpoint point (not the top), distinguished from the
+    original by the snapshot return value."""
+    from .qemu import QemuKernel
+    with QemuKernel() as q:
+        seen = []
+        _await(q, "hello", seen)
+        q.send(b"f")
+        done = _await(q, "suite_done", seen)
+
+        by_type = {}
+        for e in seen:
+            by_type.setdefault(e["type"], []).append(e)
+
+        # A snapshot was taken.
+        assert by_type.get("snapshot"), "no snapshot event"
+        starts = by_type["payload_start"]
+        outputs = by_type["payload_output"]
+
+        # Exactly one original run (restored:false) and >=2 restored forks.
+        originals = [s for s in starts if not s["restored"]]
+        restored = [s for s in starts if s["restored"]]
+        assert len(originals) == 1, f"expected one original run: {originals}"
+        assert len(restored) >= 2, f"expected >=2 forked continuations: {restored}"
+
+        # The pre-checkpoint line was printed exactly ONCE (only the original
+        # ran the code before the snapshot); each continuation resumed AFTER
+        # it, so it printed the post-snapshot lines but never the pre line.
+        pre = [o for o in outputs if o["data"] == "before the checkpoint"]
+        assert len(pre) == 1, f"'before the checkpoint' should print once, got {len(pre)}"
+
+        for fork in restored:
+            fpid = fork["pid"]
+            fout = [o["data"] for o in outputs if o["pid"] == fpid]
+            assert "restored continuation (resumed from checkpoint)" in fout, \
+                f"fork {fpid} did not resume from the checkpoint: {fout}"
+            assert "before the checkpoint" not in fout, \
+                f"fork {fpid} re-ran pre-checkpoint code (restore started from the top!): {fout}"
+            assert "common tail after the checkpoint" in fout, \
+                f"fork {fpid} did not run the post-checkpoint tail: {fout}"
+
+        # Original took the >0 branch; forks took the ==0 branch — the
+        # fork()-style distinction makes this a real what-if verb.
+        opid = originals[0]["pid"]
+        oout = [o["data"] for o in outputs if o["pid"] == opid]
+        assert "original branch (kept running)" in oout, f"original didn't take its branch: {oout}"
+
+        assert done["exited"] >= 3, f"expected original + forks to all exit: {done}"
+
+        # Liveness after all the checkpoint machinery.
+        q.send(b"r")
+        ring = _await(q, "trap_ring", seen)
+        assert ring["count"] >= 4, f"kernel unresponsive after checkpoint suite: {ring}"
 
 
 @milestone("hardening")

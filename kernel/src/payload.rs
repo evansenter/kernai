@@ -11,11 +11,13 @@
 //! the scheduler between payloads; the two never run concurrently.
 
 use core::fmt::Write;
-use core::sync::atomic::{AtomicIsize, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{
+    AtomicBool, AtomicIsize, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering,
+};
 
 use crate::console::FrameBuf;
 use crate::mm::{self, AddressSpace};
-use crate::{elf, events, hal};
+use crate::{elf, events, frames, hal};
 
 const RE: Ordering = Ordering::Relaxed;
 
@@ -91,6 +93,8 @@ static CHILD: &[u8] = include_bytes!(env!("PAYLOAD_CHILD"));
 static RUNAWAY: &[u8] = include_bytes!(env!("PAYLOAD_RUNAWAY"));
 static WILD: &[u8] = include_bytes!(env!("PAYLOAD_WILD"));
 static WXVIOL: &[u8] = include_bytes!(env!("PAYLOAD_WXVIOL"));
+static FORKER: &[u8] = include_bytes!(env!("PAYLOAD_FORKER"));
+static LEAKER: &[u8] = include_bytes!(env!("PAYLOAD_LEAKER"));
 
 static IMAGES: &[Image] = &[
     Image {
@@ -148,6 +152,20 @@ static IMAGES: &[Image] = &[
         caps: CAP_WRITE,
         deadline: 0,
     },
+    // forker: checkpoints itself; the kernel forks the checkpoint (P8).
+    Image {
+        name: "forker",
+        elf: FORKER,
+        caps: CAP_WRITE,
+        deadline: 0,
+    },
+    // leaker: hands the kernel a kernel pointer via write() (confused deputy).
+    Image {
+        name: "leaker",
+        elf: LEAKER,
+        caps: CAP_WRITE,
+        deadline: 0,
+    },
 ];
 
 const IMG_HELLO: usize = 0;
@@ -158,6 +176,8 @@ const IMG_CHILD: usize = 4;
 const IMG_RUNAWAY: usize = 5;
 const IMG_WILD: usize = 6;
 const IMG_WXVIOL: usize = 7;
+const IMG_FORKER: usize = 8;
+const IMG_LEAKER: usize = 9;
 
 /// Map a payload-supplied spawn selector (stable ABI, see payloads/sys) to an
 /// image index. Only images a payload is allowed to spawn appear here.
@@ -193,6 +213,9 @@ struct Slot {
     deadline: AtomicU64,
     /// Root frame of this payload's address space (0 = none / reaped).
     root: AtomicUsize,
+    /// Pool frame holding a saved trap frame to resume from (M6 restore);
+    /// 0 = start fresh from the ELF entry.
+    resume_frame: AtomicUsize,
 }
 
 impl Slot {
@@ -206,6 +229,7 @@ impl Slot {
             started_at: AtomicU64::new(0),
             deadline: AtomicU64::new(0),
             root: AtomicUsize::new(0),
+            resume_frame: AtomicUsize::new(0),
         }
     }
 }
@@ -213,6 +237,39 @@ impl Slot {
 static TABLE: [Slot; MAX_PROC] = [const { Slot::new() }; MAX_PROC];
 /// pid of the payload currently on the CPU, or NO_PID in kernel/idle.
 static CURRENT: AtomicUsize = AtomicUsize::new(NO_PID);
+
+// ---- Checkpoints (M6, P8) -----------------------------------------------
+
+const MAX_SNAP: usize = 4;
+
+/// A frozen point-in-time copy of a payload: an independent deep copy of its
+/// address space, its saved register frame, and its CapSet. `restore`/`fork`
+/// build a new payload from it.
+struct Snapshot {
+    valid: AtomicBool,
+    root: AtomicUsize,  // deep-copied address space root
+    frame: AtomicUsize, // pool frame holding the saved trap frame
+    caps: AtomicU32,
+    image: AtomicUsize,
+}
+
+impl Snapshot {
+    const fn new() -> Self {
+        Snapshot {
+            valid: AtomicBool::new(false),
+            root: AtomicUsize::new(0),
+            frame: AtomicUsize::new(0),
+            caps: AtomicU32::new(0),
+            image: AtomicUsize::new(0),
+        }
+    }
+}
+
+static SNAPS: [Snapshot; MAX_SNAP] = [const { Snapshot::new() }; MAX_SNAP];
+/// The most recent snapshot id created this suite (1-based; 0 = none).
+static LAST_SNAP: AtomicIsize = AtomicIsize::new(0);
+/// How many more checkpoint continuations the current suite owes (P8 fork).
+static AUTO_FORK: AtomicUsize = AtomicUsize::new(0);
 
 /// The kernel image must not overlap the physical frame pool. Panics loudly
 /// at boot if the linker ever lets them collide.
@@ -226,6 +283,26 @@ pub fn assert_pool_clear() {
 fn clear_table() {
     for slot in TABLE.iter() {
         slot.state.store(EMPTY, RE);
+    }
+    free_snapshots();
+    AUTO_FORK.store(0, RE);
+    LAST_SNAP.store(0, RE);
+}
+
+/// Free all snapshots (their deep-copied address spaces + saved frames).
+/// Called under the kernel satp when a new suite is seeded.
+fn free_snapshots() {
+    for s in SNAPS.iter() {
+        if s.valid.swap(false, RE) {
+            let root = s.root.swap(0, RE);
+            if root != 0 {
+                AddressSpace::from_root(root).destroy();
+            }
+            let f = s.frame.swap(0, RE);
+            if f != 0 {
+                frames::free(f);
+            }
+        }
     }
 }
 
@@ -254,7 +331,18 @@ pub fn seed_suite_m5() {
     clear_table();
     enqueue(IMG_WILD, IMAGES[IMG_WILD].caps, NO_PID);
     enqueue(IMG_WXVIOL, IMAGES[IMG_WXVIOL].caps, NO_PID);
+    enqueue(IMG_LEAKER, IMAGES[IMG_LEAKER].caps, NO_PID);
     enqueue(IMG_HELLO, IMAGES[IMG_HELLO].caps, NO_PID);
+}
+
+/// M6 suite (operator-triggered by 'f'): checkpoint/restore/fork (P8). The
+/// forker checkpoints itself mid-run; after it exits the kernel forks that
+/// checkpoint into two independent continuations, each resuming from the
+/// checkpoint point (not the top).
+pub fn seed_suite_m6() {
+    clear_table();
+    enqueue(IMG_FORKER, IMAGES[IMG_FORKER].caps, NO_PID);
+    AUTO_FORK.store(2, RE); // two what-if continuations
 }
 
 fn enqueue(image: usize, caps: u32, parent: usize) -> Option<usize> {
@@ -267,6 +355,7 @@ fn enqueue(image: usize, caps: u32, parent: usize) -> Option<usize> {
             slot.deadline.store(IMAGES[image].deadline, RE);
             slot.started_at.store(0, RE);
             slot.root.store(0, RE);
+            slot.resume_frame.store(0, RE);
             slot.state.store(PENDING, RE);
             return Some(pid);
         }
@@ -287,8 +376,9 @@ pub extern "C" fn scheduler_resume() -> ! {
     run()
 }
 
-/// Pick and start the next pending payload; when the queue drains, announce
-/// it and drop to the idle command loop. Diverges either way.
+/// Pick and start the next pending payload; when the queue drains, fork any
+/// pending checkpoint continuations (M6), else announce completion and drop
+/// to idle. Diverges every path.
 ///
 /// Entered fresh each time (from kmain or via scheduler_resume after a
 /// payload leaves). First switches to the kernel address space — so the
@@ -298,29 +388,54 @@ pub fn run() -> ! {
     CURRENT.store(NO_PID, RE);
     hal::write_satp(kernel_satp());
     reap_terminated();
-    match take_next_pending() {
-        Some(pid) => start(pid),
-        None => {
-            emit_suite_done();
-            crate::idle()
+    if let Some(pid) = take_next_pending() {
+        start(pid);
+    }
+    // No pending payload: are there checkpoint forks still owed?
+    let owed = AUTO_FORK.load(RE);
+    let sid = LAST_SNAP.load(RE);
+    if owed > 0 && sid > 0 {
+        AUTO_FORK.store(owed - 1, RE);
+        if let Some(pid) = enqueue_restore((sid - 1) as usize) {
+            start(pid);
         }
     }
+    emit_suite_done();
+    crate::idle()
 }
 
-/// Free the address space of every payload that has reached a terminal state,
-/// returning its frames to the pool. Safe to call only under the kernel satp
-/// (never while a payload table is active).
+/// Free the address space (and any saved resume frame) of every payload that
+/// has reached a terminal state, returning its frames to the pool. Safe to
+/// call only under the kernel satp (never while a payload table is active).
 fn reap_terminated() {
     for slot in TABLE.iter() {
-        let root = slot.root.load(RE);
-        if root != 0 && matches!(slot.state.load(RE), EXITED | FAULTED | KILLED) {
-            AddressSpace::from_root(root).destroy();
-            slot.root.store(0, RE);
+        if matches!(slot.state.load(RE), EXITED | FAULTED | KILLED) {
+            let root = slot.root.swap(0, RE);
+            if root != 0 {
+                AddressSpace::from_root(root).destroy();
+            }
+            let rf = slot.resume_frame.swap(0, RE);
+            if rf != 0 {
+                frames::free(rf);
+            }
         }
     }
 }
 
 fn start(pid: usize) -> ! {
+    // Restored continuation (M6): the address space is already built and a
+    // saved trap frame is waiting — resume straight into it.
+    let resume = TABLE[pid].resume_frame.load(RE);
+    if resume != 0 {
+        let root = TABLE[pid].root.load(RE);
+        TABLE[pid].state.store(RUNNING, RE);
+        TABLE[pid].started_at.store(hal::read_time(), RE);
+        CURRENT.store(pid, RE);
+        let name = IMAGES[TABLE[pid].image.load(RE)].name;
+        emit_start(pid, name, TABLE[pid].caps.load(RE), 0, true);
+        hal::resume_user(AddressSpace::from_root(root).satp(), resume);
+    }
+
     let image = TABLE[pid].image.load(RE);
     let img = &IMAGES[image];
 
@@ -341,12 +456,25 @@ fn start(pid: usize) -> ! {
         }
     };
 
+    // Fresh-start register frame: zeroed GPRs (no kernel value leaks across
+    // the privilege boundary), sepc = entry, U-mode. Resume through the same
+    // path a restore uses.
+    let frame = match frames::alloc() {
+        Some(f) => f,
+        None => {
+            space.destroy();
+            load_failed(pid, img.name, "out_of_memory");
+        }
+    };
+    crate::traps::init_frame_to(frame, entry);
+
     TABLE[pid].root.store(space.root(), RE);
+    TABLE[pid].resume_frame.store(frame, RE);
     TABLE[pid].state.store(RUNNING, RE);
     TABLE[pid].started_at.store(hal::read_time(), RE);
     CURRENT.store(pid, RE);
-    emit_start(pid, img.name, TABLE[pid].caps.load(RE), entry);
-    hal::enter_user(space.satp(), entry)
+    emit_start(pid, img.name, TABLE[pid].caps.load(RE), entry, false);
+    hal::resume_user(space.satp(), frame)
 }
 
 fn load_failed(pid: usize, name: &str, reason: &str) -> ! {
@@ -405,6 +533,86 @@ pub fn mark_faulted() {
 /// never observes a stale CURRENT (which on_tick could misread).
 pub fn leave_current() {
     CURRENT.store(NO_PID, RE);
+}
+
+/// Checkpoint the calling payload (P8). Deep-copies its address space, saves
+/// its register frame (with a0 forced to 0 so a restored continuation can
+/// tell it apart from the original), records its CapSet, and returns a
+/// positive snapshot id. `frame` is the payload's trap frame at the
+/// `sys_snapshot` ecall (sepc already advanced past it).
+pub fn on_snapshot(frame: &crate::traps::TrapFrame) -> isize {
+    let pid = match current_pid() {
+        Some(p) => p,
+        None => return crate::syscall::EINVAL,
+    };
+    let space = match current_space() {
+        Some(s) => s,
+        None => return crate::syscall::EINVAL,
+    };
+    let sid = match SNAPS.iter().position(|s| !s.valid.load(RE)) {
+        Some(i) => i,
+        None => return crate::syscall::EAGAIN,
+    };
+    let snap_as = match space.deep_copy() {
+        Some(a) => a,
+        None => return crate::syscall::ENOMEM,
+    };
+    let snap_frame = match frames::alloc() {
+        Some(f) => f,
+        None => {
+            snap_as.destroy();
+            return crate::syscall::ENOMEM;
+        }
+    };
+    crate::traps::save_frame_to(frame, snap_frame, 0); // restores see a0 = 0
+    SNAPS[sid].root.store(snap_as.root(), RE);
+    SNAPS[sid].frame.store(snap_frame, RE);
+    SNAPS[sid].caps.store(TABLE[pid].caps.load(RE), RE);
+    SNAPS[sid].image.store(TABLE[pid].image.load(RE), RE);
+    SNAPS[sid].valid.store(true, RE);
+    LAST_SNAP.store(sid as isize + 1, RE);
+    emit_snapshot(pid, sid + 1);
+    (sid + 1) as isize
+}
+
+/// Build a new pending payload that resumes from snapshot `sid` (restore /
+/// fork). Deep-copies the snapshot's address space (so continuations are
+/// independent) and its saved frame. Returns the new pid, or None.
+fn enqueue_restore(sid: usize) -> Option<usize> {
+    if !SNAPS[sid].valid.load(RE) {
+        return None;
+    }
+    let new_as = AddressSpace::from_root(SNAPS[sid].root.load(RE)).deep_copy()?;
+    let new_frame = match frames::alloc() {
+        Some(f) => f,
+        None => {
+            new_as.destroy();
+            return None;
+        }
+    };
+    let mut buf = [0u8; mm::PAGE_SIZE];
+    if !hal::phys_read(SNAPS[sid].frame.load(RE), &mut buf) || !hal::phys_write(new_frame, &buf) {
+        new_as.destroy();
+        frames::free(new_frame);
+        return None;
+    }
+    for (pid, slot) in TABLE.iter().enumerate() {
+        if slot.state.load(RE) == EMPTY {
+            slot.image.store(SNAPS[sid].image.load(RE), RE);
+            slot.caps.store(SNAPS[sid].caps.load(RE), RE);
+            slot.parent.store(NO_PID, RE);
+            slot.exit_code.store(0, RE);
+            slot.deadline.store(0, RE);
+            slot.started_at.store(0, RE);
+            slot.root.store(new_as.root(), RE);
+            slot.resume_frame.store(new_frame, RE);
+            slot.state.store(PENDING, RE);
+            return Some(pid);
+        }
+    }
+    new_as.destroy();
+    frames::free(new_frame);
+    None
 }
 
 /// Called from the timer handler. Returns true if the current payload has
@@ -551,16 +759,28 @@ fn caps_json(f: &mut FrameBuf, caps: u32) {
     let _ = f.write_str("]");
 }
 
-fn emit_start(pid: usize, name: &str, caps: u32, entry: usize) {
+fn emit_start(pid: usize, name: &str, caps: u32, entry: usize, restored: bool) {
     hal::without_interrupts(|| {
         let mut f = FrameBuf::new();
         let _ = write!(
             f,
-            r#"{{"id":{},"type":"payload_start","pid":{pid},"name":"{name}","entry":"0x{entry:x}","caps":"#,
+            r#"{{"id":{},"type":"payload_start","pid":{pid},"name":"{name}","entry":"0x{entry:x}","restored":{restored},"caps":"#,
             events::next_id()
         );
         caps_json(&mut f, caps);
         let _ = f.write_str("}");
+        f.emit();
+    });
+}
+
+fn emit_snapshot(pid: usize, id: usize) {
+    hal::without_interrupts(|| {
+        let mut f = FrameBuf::new();
+        let _ = write!(
+            f,
+            r#"{{"id":{},"type":"snapshot","pid":{pid},"snapshot":{id}}}"#,
+            events::next_id()
+        );
         f.emit();
     });
 }

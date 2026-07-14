@@ -14,13 +14,15 @@ pub const SYS_EXIT: u64 = 0;
 pub const SYS_WRITE: u64 = 1;
 pub const SYS_YIELD: u64 = 2;
 pub const SYS_SPAWN: u64 = 3;
+pub const SYS_SNAPSHOT: u64 = 4;
 
 // errno-style returns (negative). Kept few and structured.
 pub const ENOSYS: isize = -1;
 pub const ENOCAP: isize = -2;
 pub const EFAULT: isize = -3;
 pub const EINVAL: isize = -4;
-pub const EAGAIN: isize = -5; // no free process slot
+pub const EAGAIN: isize = -5; // no free process/snapshot slot
+pub const ENOMEM: isize = -6; // frame pool exhausted
 
 /// What the trap handler should do after a syscall.
 pub enum Outcome {
@@ -41,6 +43,7 @@ pub fn dispatch(frame: &mut TrapFrame) -> Outcome {
         SYS_WRITE => Outcome::Resume(sys_write(a0, a1)),
         SYS_YIELD => Outcome::Resume(payload::on_yield()),
         SYS_SPAWN => Outcome::Resume(payload::on_spawn(a0, a1 as u32)),
+        SYS_SNAPSHOT => Outcome::Resume(payload::on_snapshot(frame)),
         _ => Outcome::Resume(ENOSYS),
     }
 }

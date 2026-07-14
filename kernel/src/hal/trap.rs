@@ -13,7 +13,6 @@ use super::{boot, csr};
 use crate::traps::TrapFrame;
 
 const SSTATUS_SPP: u64 = 1 << 8;
-const SSTATUS_SPIE: u64 = 1 << 5;
 
 // Layout must match crate::traps::TrapFrame exactly:
 //   regs[31] (x1..x31 at offset (n-1)*8) | sepc @ 248 | sstatus @ 256.
@@ -114,10 +113,80 @@ __trap_vector:
     "#
 );
 
+// Resume a payload from a full saved trap frame (M6 restore/fork, and the
+// basis for real suspend/resume scheduling). Loads every register + sepc +
+// sstatus from the frame at a1 and srets into U-mode under the satp in a0.
+// Mirrors the trap-restore tail; lives in global_asm so it costs no
+// inline-unsafe budget. The frame is a kernel-owned pool frame (identity-
+// mapped), so a1 is a valid pointer under both kernel and payload satp.
+global_asm!(
+    r#"
+    .section .text
+    .align 4
+    .globl __resume_user
+__resume_user:                 // a0 = satp, a1 = frame physical address
+    csrci sstatus, 2           // interrupts off until the sret restores them
+    csrw  satp, a0
+    sfence.vma
+    la    t0, __trap_stack_top
+    csrw  sscratch, t0         // U-mode trap-stack convention
+    mv    sp, a1               // frame pointer
+    ld    t0, 248(sp)
+    csrw  sepc, t0
+    ld    t0, 256(sp)
+    csrw  sstatus, t0          // SPP=0, SPIE=1 (saved from the U-mode trap)
+    ld    x1,   0(sp)
+    ld    x3,  16(sp)
+    ld    x4,  24(sp)
+    ld    x5,  32(sp)
+    ld    x6,  40(sp)
+    ld    x7,  48(sp)
+    ld    x8,  56(sp)
+    ld    x9,  64(sp)
+    ld    x10, 72(sp)
+    ld    x11, 80(sp)
+    ld    x12, 88(sp)
+    ld    x13, 96(sp)
+    ld    x14, 104(sp)
+    ld    x15, 112(sp)
+    ld    x16, 120(sp)
+    ld    x17, 128(sp)
+    ld    x18, 136(sp)
+    ld    x19, 144(sp)
+    ld    x20, 152(sp)
+    ld    x21, 160(sp)
+    ld    x22, 168(sp)
+    ld    x23, 176(sp)
+    ld    x24, 184(sp)
+    ld    x25, 192(sp)
+    ld    x26, 200(sp)
+    ld    x27, 208(sp)
+    ld    x28, 216(sp)
+    ld    x29, 224(sp)
+    ld    x30, 232(sp)
+    ld    x31, 240(sp)
+    ld    sp,   8(sp)          // x2 last
+    sret
+    "#
+);
+
 // SAFETY: __trap_vector is defined by the global_asm above in this file; it
 // is only ever *named* (address taken for stvec), never called from Rust.
+// __resume_user is defined in global_asm just above; it loads a full frame
+// and srets, diverging.
 unsafe extern "C" {
     fn __trap_vector();
+    fn __resume_user(satp: u64, frame_pa: usize) -> !;
+}
+
+/// Resume a payload from a saved trap frame (M6). `frame_pa` points at a
+/// kernel-owned pool frame holding the 264-byte TrapFrame in the trap
+/// vector's layout; `satp` selects the payload's address space.
+pub fn resume_user(satp: u64, frame_pa: usize) -> ! {
+    // SAFETY: __resume_user restores the frame we saved and srets into U-mode
+    // with interrupts cleared until the sret; the frame layout matches the
+    // trap vector's exactly (crate::traps writes it).
+    unsafe { __resume_user(satp, frame_pa) }
 }
 
 /// Point stvec at the trap vector and establish the S-mode sscratch
@@ -139,43 +208,6 @@ extern "C" fn __kernai_trap(frame: &mut TrapFrame) {
         csr::write_sscratch(boot::trap_stack_top());
     } else {
         csr::write_sscratch(0);
-    }
-}
-
-/// First entry into a freshly loaded payload: switch to its address space
-/// (`satp`) and drop to U-mode at `entry`. The payload's own `_start` sets
-/// its stack; registers are not scrubbed (a follow-up hardening item —
-/// pre-M5 there were no secrets, now the register file could leak a kernel
-/// value into a fresh payload; low risk, tracked in HANDOFF).
-pub fn enter_user(satp: u64, entry: usize) -> ! {
-    let trap_stack = boot::trap_stack_top();
-    // SAFETY: the satp switch, sscratch arm, and sret must be atomic w.r.t.
-    // interrupts. enter_user runs in S-mode with interrupts enabled (the
-    // scheduler is reached with SPIE=1). A timer in the window between arming
-    // sscratch and the sret — seeing sscratch != 0 — would be misclassified
-    // as from-U, and __kernai_trap would reset sscratch to 0, so the payload
-    // would enter with a desynced sscratch and corrupt its next trap. So we
-    // clear sstatus.SIE first; sret restores SIE from SPIE=1, re-enabling
-    // interrupts atomically on entry to U-mode. The satp switch is safe mid-
-    // function because every payload table carries the kernel identity
-    // gigapage, so this code stays mapped. SPP=0 selects U-mode.
-    unsafe {
-        core::arch::asm!(
-            "csrci sstatus, 2",         // clear sstatus.SIE: no trap in the window below
-            "csrw satp, {satp}",        // switch to the payload's address space
-            "sfence.vma",               // flush stale TLB entries
-            "csrw sscratch, {tstack}",  // arm the U-mode trap stack
-            "csrw sepc, {entry}",
-            "csrc sstatus, {spp}",      // SPP = 0 (return to U-mode)
-            "csrs sstatus, {spie}",     // SPIE = 1 (interrupts on after sret)
-            "sret",
-            satp = in(reg) satp,
-            tstack = in(reg) trap_stack,
-            entry = in(reg) entry,
-            spp = in(reg) SSTATUS_SPP,
-            spie = in(reg) SSTATUS_SPIE,
-            options(noreturn),
-        )
     }
 }
 
