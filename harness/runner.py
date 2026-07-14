@@ -711,6 +711,63 @@ def m10_delegation_attenuation():
             f"redelegator's request was not greedy: {s2}"
 
 
+@milestone("m11")
+def m11_autonomy_and_budgets():
+    """Autonomy dial + P3 token-budgeted event digest. A budgeted `digest`
+    resource coalesces the firehose (hundreds of ticks) into per-severity totals
+    plus at most `budget` notable events, always preserving the high-severity
+    ones. The autonomy dial, set over the control plane, makes the kernel
+    self-manage attention: at high autonomy it suppresses trace-severity tick
+    frames from the wire while still counting them (and checking deadlines)."""
+    from .mcp import Mcp
+    from .qemu import QemuKernel
+
+    with QemuKernel() as q:
+        assert json.loads(q.stream.next_frame(timeout=60))["type"] == "hello"
+        m = Mcp(q)
+        # Generate activity: ticks + syscalls + a fault.
+        m.result("tools/call", {"name": "run_suite", "arguments": {"suite": "p"}})
+        while True:
+            if json.loads(q.stream.next_frame(timeout=30))["type"] == "suite_done":
+                break
+
+        # A budgeted digest is a bounded summary, not the firehose.
+        dg = m.result("resources/read", {"uri": "digest", "budget": 2})
+        t = dg["totals"]
+        assert t["timer"] > 10, f"expected many ticks: {t}"
+        assert t["fault"] >= 1 and t["ecall"] >= 1, f"missing notable traps: {t}"
+        assert t["traps"] == t["timer"] + t["ecall"] + t["fault"], f"totals inconsistent: {t}"
+        assert len(dg["items"]) <= 2, f"digest exceeded budget: {dg}"
+        assert dg["elided"] >= t["timer"], f"ticks not coalesced away: {dg}"
+        assert dg["by_severity"]["error"] >= 1, f"fault not counted: {dg}"
+
+        # High-severity events survive budgeting: with budget 1 the single item
+        # is the error (fault), not one of the hundreds of trace ticks.
+        dg1 = m.result("resources/read", {"uri": "digest", "budget": 1})
+        assert len(dg1["items"]) == 1 and dg1["items"][0]["severity"] == "error", \
+            f"budget=1 did not preserve the fault: {dg1}"
+        # A huge budget is clamped; the digest never unbounds.
+        dgn = m.result("resources/read", {"uri": "digest", "budget": 100000})
+        assert len(dgn["items"]) <= 4, f"budget not clamped: {len(dgn['items'])}"
+
+        # Autonomy dial: go autonomous and confirm ticks vanish from the wire
+        # while still firing internally (the timer counter climbs).
+        assert m.result("tools/call", {"name": "set_autonomy", "arguments": {"mode": "autonomous"}})["autonomy"] == "autonomous"
+        assert m.result("resources/read", {"uri": "autonomy"})["autonomy"] == "autonomous"
+        t_before = m.result("resources/read", {"uri": "digest", "budget": 1})["totals"]["timer"]
+        tick_frames = 0
+        for _ in range(12):
+            col = []
+            m.result("initialize", collect=col)
+            tick_frames += sum(1 for e in col if e.get("type") == "tick")
+        t_after = m.result("resources/read", {"uri": "digest", "budget": 1})["totals"]["timer"]
+        assert tick_frames == 0, f"autonomous surface still emitted {tick_frames} tick frames"
+        assert t_after > t_before, f"ticks stopped firing internally: {t_before} -> {t_after}"
+
+        # Reactive restores the firehose (and does not break later checks).
+        assert m.result("tools/call", {"name": "set_autonomy", "arguments": {"mode": "reactive"}})["autonomy"] == "reactive"
+
+
 @milestone("determinism")
 def determinism_two_boots():
     """P9 seed (E6): two input-free boots yield byte-identical event streams."""

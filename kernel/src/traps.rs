@@ -130,6 +130,48 @@ static TICKS: AtomicU64 = AtomicU64::new(0);
 /// handler-latency drift in the cadence.
 static NEXT_DEADLINE: AtomicU64 = AtomicU64::new(0);
 
+// ---- M11: attention budgeting (P3) + autonomy dial ----------------------
+
+/// Per-severity trap counters (P3): the digest coalesces the firehose into
+/// these totals, so the operator spends tokens on a summary, not every tick.
+/// (Timer ticks are counted by `TICKS` above.)
+static ECALL_TRAPS: AtomicU64 = AtomicU64::new(0);
+static FAULT_TRAPS: AtomicU64 = AtomicU64::new(0);
+
+/// The last few NON-timer ("notable") traps, never evicted by ticks — so a
+/// fault stays visible in the digest no matter how many ticks follow it.
+const NOTABLE_SIZE: usize = 4;
+static NOTABLE: [RingSlot; NOTABLE_SIZE] = [const { RingSlot::new() }; NOTABLE_SIZE];
+static NOTABLE_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Autonomy dial (P1/P3). Reactive (default): every event reaches the operator.
+/// Autonomous: the kernel decides trace-severity events (ticks) aren't worth
+/// the operator's token budget and suppresses them from the wire — still
+/// counting them and still checking payload deadlines — leaving a budgeted
+/// `digest` to pull on demand.
+static AUTONOMOUS: AtomicBool = AtomicBool::new(false);
+
+/// Select autonomous (true) or reactive (false) event handling.
+pub fn set_autonomous(on: bool) {
+    AUTONOMOUS.store(on, Ordering::Relaxed);
+}
+
+/// True if the kernel is currently self-managing operator attention.
+pub fn autonomous() -> bool {
+    AUTONOMOUS.load(Ordering::Relaxed)
+}
+
+/// Severity of a trap by cause (P3): faults are errors, syscalls are info,
+/// ticks are trace (coalesced away under a budget).
+fn severity_of(scause: u64) -> &'static str {
+    match scause {
+        CAUSE_S_TIMER => "trace",
+        CAUSE_U_ECALL => "info",
+        s if s & INTERRUPT_BIT != 0 => "warn",
+        _ => "error", // illegal instruction, page faults, etc.
+    }
+}
+
 /// Schedule the first tick. Call once from kmain, before enabling
 /// interrupts.
 pub fn arm_first_tick() {
@@ -146,6 +188,23 @@ fn ring_record(id: u64, scause: u64, sepc: u64, stval: u64) {
     slot.sepc.store(sepc, Ordering::Relaxed);
     slot.stval.store(stval, Ordering::Relaxed);
     RING_COUNT.store(n + 1, Ordering::Relaxed);
+    // Severity tally + a tick-proof record of notable (non-timer) traps (P3).
+    // Timer ticks are already counted by TICKS; here we log the events an
+    // operator actually spends attention on so the digest can surface them.
+    if scause != CAUSE_S_TIMER {
+        if scause == CAUSE_U_ECALL {
+            ECALL_TRAPS.fetch_add(1, Ordering::Relaxed);
+        } else {
+            FAULT_TRAPS.fetch_add(1, Ordering::Relaxed);
+        }
+        let m = NOTABLE_COUNT.load(Ordering::Relaxed);
+        let nslot = &NOTABLE[(m % NOTABLE_SIZE as u64) as usize];
+        nslot.id.store(id, Ordering::Relaxed);
+        nslot.scause.store(scause, Ordering::Relaxed);
+        nslot.sepc.store(sepc, Ordering::Relaxed);
+        nslot.stval.store(stval, Ordering::Relaxed);
+        NOTABLE_COUNT.store(m + 1, Ordering::Relaxed);
+    }
 }
 
 /// All traps land here (from hal's vector). Timer ticks are serviced and
@@ -170,13 +229,19 @@ pub fn handle(frame: &mut TrapFrame) {
         NEXT_DEADLINE.store(next, Ordering::Relaxed);
         hal::set_timer(next);
         let seq = TICKS.fetch_add(1, Ordering::Relaxed) + 1;
-        let mut f = FrameBuf::new();
-        let _ = write!(
-            f,
-            r#"{{"id":{id},"type":"tick","seq":{seq},"time":{}}}"#,
-            hal::read_time()
-        );
-        f.emit();
+        // Autonomy dial (P3): under autonomous attention the kernel suppresses
+        // the tick FRAME (trace severity) from the wire — the tick still
+        // happened (counted, deadline checked below), it just isn't spent on
+        // the operator's token budget. Reactive (default) emits it.
+        if !autonomous() {
+            let mut f = FrameBuf::new();
+            let _ = write!(
+                f,
+                r#"{{"id":{id},"type":"tick","seq":{seq},"time":{}}}"#,
+                hal::read_time()
+            );
+            f.emit();
+        }
         // M4 seam: a running payload's instruction-count deadline is checked
         // here; an over-budget payload is redirected to the scheduler
         // (crate::payload::on_tick returns whether it killed the current one).
@@ -316,6 +381,51 @@ pub fn write_ring_resource(f: &mut FrameBuf) -> core::fmt::Result {
     )?;
     write_ring(f)?;
     f.write_str("}")
+}
+
+/// A budgeted, coalesced digest of kernel activity (P3, the `digest` resource):
+/// instead of the firehose, return per-severity totals — every timer tick
+/// collapsed into a count — plus up to `budget` of the most-recent NOTABLE
+/// traps (faults, syscalls), newest first. The operator spends a bounded number
+/// of tokens and still sees what matters; `elided` is how much was summarized
+/// away. This is P3 made concrete: "endpoints accept a budget, return a
+/// summary, not a firehose."
+pub fn write_digest(f: &mut FrameBuf, budget: usize) -> core::fmt::Result {
+    let ticks = TICKS.load(Ordering::Relaxed);
+    let ecalls = ECALL_TRAPS.load(Ordering::Relaxed);
+    let faults = FAULT_TRAPS.load(Ordering::Relaxed);
+    let total = RING_COUNT.load(Ordering::Relaxed);
+    write!(
+        f,
+        r#"{{"budget":{budget},"autonomy":"{}","totals":{{"traps":{total},"timer":{ticks},"ecall":{ecalls},"fault":{faults}}},"by_severity":{{"error":{faults},"info":{ecalls},"trace":{ticks}}},"items":["#,
+        if autonomous() {
+            "autonomous"
+        } else {
+            "reactive"
+        },
+    )?;
+    let recorded = NOTABLE_COUNT.load(Ordering::Relaxed);
+    // Show at most `budget`, and at most what's actually in the notable ring.
+    let show = (recorded as usize).min(budget).min(NOTABLE_SIZE);
+    for k in 0..show {
+        if k > 0 {
+            f.write_str(",")?;
+        }
+        let idx = ((recorded - 1 - k as u64) % NOTABLE_SIZE as u64) as usize;
+        let slot = &NOTABLE[idx];
+        let sc = slot.scause.load(Ordering::Relaxed);
+        write!(
+            f,
+            r#"{{"id":{},"severity":"{}","cause":"{}","sepc":"0x{:x}"}}"#,
+            slot.id.load(Ordering::Relaxed),
+            severity_of(sc),
+            cause_name(sc),
+            slot.sepc.load(Ordering::Relaxed),
+        )?;
+    }
+    // Everything the digest coalesced away: all traps minus the few shown.
+    let elided = total.saturating_sub(show as u64);
+    write!(f, r#"],"elided":{elided}}}"#)
 }
 
 /// The v0 diagnostic frame (P6): everything we know about the fault,

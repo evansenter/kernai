@@ -185,6 +185,20 @@ fn handle_tools_call(json: &str, id: &str) {
                 _ => respond_error(id, -32602, "mode must be classic|agentic"),
             }
         }
+        Some("set_autonomy") => {
+            let args = object_get(params, "arguments").unwrap_or("{}");
+            match object_get(args, "mode").and_then(as_string) {
+                Some("autonomous") => {
+                    traps::set_autonomous(true);
+                    respond_result(id, |f| f.write_str(r#"{"autonomy":"autonomous"}"#));
+                }
+                Some("reactive") => {
+                    traps::set_autonomous(false);
+                    respond_result(id, |f| f.write_str(r#"{"autonomy":"reactive"}"#));
+                }
+                _ => respond_error(id, -32602, "mode must be reactive|autonomous"),
+            }
+        }
         Some(_) => respond_error(id, -32602, "unknown tool"),
         None => respond_error(id, -32602, "missing tool name"),
     }
@@ -204,6 +218,24 @@ fn handle_resources_read(json: &str, id: &str) {
             };
             write!(f, r#"{{"surface":"{mode}"}}"#)
         }),
+        Some("autonomy") => respond_result(id, |f| {
+            let mode = if traps::autonomous() {
+                "autonomous"
+            } else {
+                "reactive"
+            };
+            write!(f, r#"{{"autonomy":"{mode}"}}"#)
+        }),
+        Some("digest") => {
+            // P3: the endpoint accepts a token/item budget parameter and returns
+            // a coalesced summary. Default 4; clamped so a huge budget can't
+            // grow the frame (the notable ring is small anyway).
+            let budget = object_get(params, "budget")
+                .and_then(parse_u32)
+                .unwrap_or(4)
+                .min(64) as usize;
+            respond_result(id, move |f| traps::write_digest(f, budget));
+        }
         Some(_) => respond_error(id, -32602, "unknown resource"),
         None => respond_error(id, -32602, "missing uri"),
     }
@@ -307,6 +339,13 @@ fn respond_tools_list(id: &str) {
             "Select the diagnostic surface: classic|agentic (P6/E1).",
             Some("mode"),
         )?;
+        f.write_str(",")?;
+        tool(
+            f,
+            "set_autonomy",
+            "Set the autonomy dial: reactive|autonomous (P1/P3).",
+            Some("mode"),
+        )?;
         f.write_str("]}")
     });
 }
@@ -342,6 +381,18 @@ fn respond_resources_list(id: &str) {
             f,
             "surface",
             "The active diagnostic surface (classic|agentic).",
+        )?;
+        f.write_str(",")?;
+        resource(
+            f,
+            "autonomy",
+            "The active autonomy dial (reactive|autonomous).",
+        )?;
+        f.write_str(",")?;
+        resource(
+            f,
+            "digest",
+            "Budgeted, coalesced activity summary; takes a `budget` param (P3).",
         )?;
         f.write_str("]}")
     });
@@ -531,4 +582,19 @@ fn as_string(raw: &str) -> Option<&str> {
     } else {
         None
     }
+}
+
+/// Parse a raw JSON value slice as a small unsigned integer (for the `digest`
+/// budget). Accepts a bare number or a quoted number; rejects anything else and
+/// saturates rather than overflowing.
+fn parse_u32(raw: &str) -> Option<u32> {
+    let s = as_string(raw).unwrap_or(raw).trim();
+    if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let mut n: u32 = 0;
+    for b in s.bytes() {
+        n = n.saturating_mul(10).saturating_add((b - b'0') as u32);
+    }
+    Some(n)
 }

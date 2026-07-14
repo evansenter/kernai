@@ -5,7 +5,7 @@ beyond this repo (we dogfood E3 on ourselves).
 
 ## Current state (2026-07-14, session 2)
 
-**M0–M10 complete and green.** `make test` from a fresh clone runs fourteen
+**M0–M11 complete and green.** `make test` from a fresh clone runs fifteen
 checks in ~9 seconds (fmt + clippy + build + unsafe budget first):
 
 1. `m0` — framing round-trips over a real pipe (loopback stub)
@@ -41,8 +41,13 @@ checks in ~9 seconds (fmt + clippy + build + unsafe budget first):
     (`delegator{write,spawn,yield} → redelegator{write,spawn} → worker{write}`)
     where every hop greedily requests all caps still shrinks monotonically;
     `granted ⊆ parent` at each hop, never re-widening
-13. `determinism` — two input-free boots byte-identical (P9 / E6 seed)
-14. `demo` — the narrated `make demo` (now 11 acts, incl. MCP + two-surface)
+13. `m11` — autonomy dial + P3 token-budgeted digest: the `digest` resource
+    takes a `budget` and returns per-severity totals (ticks coalesced into a
+    count) + at most `budget` notable traps, preserving the high-severity ones;
+    the `set_autonomy` dial suppresses trace-severity tick frames at autonomous
+    while still counting them (and checking deadlines)
+14. `determinism` — two input-free boots byte-identical (P9 / E6 seed)
+15. `demo` — the narrated `make demo` (now 11 acts, incl. MCP + two-surface)
 
 CI (`.github/workflows/ci.yml`) runs the same gate + `ci/unsafe_budget.sh`
 on every push. **Unsafe budget: 55/200 lines in 4/4 hal files** — the file
@@ -77,9 +82,10 @@ the local working tree is not durable.
 Single command bytes: `r` ring · `x` crash · `p`/`m`/`i`/`f`/`d` the
 M3–M6/M10 suites. Or drive it structured: a `0xAA`-led length-prefixed frame
 carrying JSON-RPC (MCP) — `initialize`, `tools/list`, `tools/call {run_suite|
-crash|ring_read|set_surface}`, `resources/list`, `resources/read {trap_ring|
-processes|spec|surface}`. `run_suite` takes `{suite: p|m|i|f|d}`. See
-`harness/mcp.py` for the client and `runner.py::m8`/`m9`/`m10` for full sessions.
+crash|ring_read|set_surface|set_autonomy}`, `resources/list`, `resources/read
+{trap_ring|processes|spec|surface|autonomy|digest}`. `run_suite` takes
+`{suite: p|m|i|f|d}`; `digest` takes `{budget: N}`. See `harness/mcp.py` for the
+client and `runner.py::m8`…`m11` for full sessions.
 
 ## Known-broken / caveats
 
@@ -100,34 +106,30 @@ processes|spec|surface}`. `run_suite` takes `{suite: p|m|i|f|d}`. See
 
 ## Exact next step
 
-**M11: autonomy dial + P3 token-budgeted event budgets.** Per the RFC ladder.
-P3: "operator attention is the scarce resource" — events are coalesced,
-severity-filtered, and budgeted, because the operator's attention is metered in
-tokens, not interrupts. M11:
+**M12: the E1–E8 evaluation suite (+ demos).** The last rung of the RFC ladder,
+and the point of the whole project: score *kernel surfaces* against a fixed
+agent. The mechanism substrate already exists — M9 gives the two surfaces
+(agentic frame vs. classic printf twin), the seeded-bug idea maps onto the
+existing fault fixtures (crasher, wild, wxviol, leaker), and the harness can
+drive either surface over MCP.
 
-1. Severity on events: tag each event kind with a severity (e.g. tick=trace,
-   payload_start=info, syscall_denied=warn, fault=error). Additive field, keep
-   existing consumers working.
-2. A budgeted observability resource: `resources/read` (or a tool) that takes a
-   token/'item' budget and returns a *coalesced digest* — the last-K by
-   severity, counts of what was elided — rather than the firehose. The trap
-   ring and process table are the obvious first digestible resources; coalesce
-   repeated ticks into a count. Think `?budget=N`.
-3. Autonomy dial: a control-plane setting (like `set_surface`) that selects how
-   much the kernel acts on its own vs. surfaces a decision — e.g. auto-reap vs.
-   hold a faulted payload for operator inspection, or auto-fork vs. ask. Start
-   with one concrete knob and its event.
-4. Acceptance: an `m11` check that a budgeted read returns a bounded digest
-   (fewer items than the full stream) while preserving the high-severity events,
-   and that the autonomy dial changes an observable behavior. Add to `make test`.
+1. **E1 (headline — diagnostic sufficiency):** build an A/B harness that, for a
+   set of seeded faults, presents an operator agent with ONLY the kernel's
+   output — structured frames on one arm, the classic printf line on the other
+   (flip via `set_surface`) — and measures localization rate / tokens. Start
+   with the existing fault fixtures as the stimulus set; grow it toward the
+   RFC's N≥20 (red-team-generated bugs that compile clean and fail ≤1 check).
+2. **E6 is already done** (M7 deterministic replay); **E3 (cold handoff)** is
+   partly dogfooded via HANDOFF.md — consider an automated check that a fresh
+   reader reconstructs state purely from `resources/read {spec,processes,
+   trap_ring,digest}` (P5/P11/P12). **E2/E5** as time allows.
+3. Wire the eval(s) into `make test` (or a separate `make eval`, since a
+   real agent-in-the-loop eval may need network/model access the CI lacks —
+   decide and log; a deterministic proxy-metric version can live in CI).
+4. Demos + spec: package the MCP surface (tool schemas, resource layout, frame
+   format, provenance rules) as a versioned `docs/SPEC.md` v0.1 — the durable
+   artifact the RFC calls out.
 
-Then M12: the E1–E8 eval suite — wire the M9 two-surface toggle into an actual
-A/B harness over a seeded-bug stimulus set (E1), plus E2/E3/E5. After the
-ladder, expand per the RFC's spirit — the eval suite as a public benchmark, the
-MCP surface published as the spec (v0.1).
-
-Then M10 (delegation/attenuation hardening — an adversarial pass on the P10
-lattice and the MCP surface), M11 (autonomy dial + P3 event budgets:
-`?budget=Ntok` summaries), M12 (the E1–E8 eval suite + demos). After the
-ladder, expand per the RFC's spirit (E-series evals as a public benchmark, the
-protocol as the durable artifact).
+After M12 the ladder is complete; expand per the RFC's spirit — the E-series as
+a public benchmark, a degraded Linux-daemon reference implementation of the same
+MCP surface, and the protocol published as the durable artifact.

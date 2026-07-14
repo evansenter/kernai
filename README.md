@@ -18,8 +18,10 @@ mutating calls (M8, P4/P5); rich P6 diagnostic frames — full register file plu
 a P12 causal parent — and a runtime-toggled `surface-classic` printf twin for
 the E1 A/B (M9); a multi-hop delegation chain proving capabilities only ever
 attenuate, never re-widen, even under a greedy "request everything" at each hop
-(M10, P10). See `docs/HANDOFF.md` for the exact next step
-(M11: autonomy dial + token-budgeted event summaries).
+(M10, P10); an autonomy dial plus a token-budgeted `digest` resource that
+coalesces the event firehose into a bounded severity-ranked summary (M11, P3).
+See `docs/HANDOFF.md` for the exact next step
+(M12: the E1–E8 evaluation suite).
 
 ## Bootstrap (Ubuntu 24.04 or similar)
 
@@ -48,8 +50,8 @@ make test    # full acceptance suite: framing (M0), boot (M1), traps/timer/fault
              # (M2), U-mode payloads (M3), caps/spawn/deadline (M4), paging/
              # isolation (M5), checkpoint/fork (M6), deterministic replay (M7),
              # MCP control plane (M8), diagnostic frames + classic twin (M9),
-             # delegation attenuation (M10), input hardening, determinism, demo —
-             # plus unsafe budget; CI runs this
+             # delegation attenuation (M10), autonomy + event budgets (M11),
+             # input hardening, determinism, demo — plus unsafe budget; CI runs this
 make debug   # boot QEMU halted with a gdb stub on :1234
 make gdb     # attach gdb-multiarch to a running `make debug`
 ```

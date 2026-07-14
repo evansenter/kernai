@@ -1,4 +1,4 @@
-# Architecture (current: M10)
+# Architecture (current: M11)
 
 One page, always accurate. Principles P1–P12 are defined in
 `RFC-001-agent-native-kernel.md`. Beginner-level narrative: `WALKTHROUGH.md`.
@@ -128,7 +128,13 @@ next. Queue drains → `suite_done` → `idle`.
   unframed → the host noise channel) instead of the rich frame — the A/B
   substrate for E1. Scope: M9 twins the diagnostic path; a fully classic event
   stream is M12 eval machinery.
-- **P3 (M11, next)**: event coalescing + severity filtering + token-budgeted
-  observability (`?budget=Ntok` returns a digest, not the firehose), and an
-  autonomy dial. Then M12 wires the M9 two-surface toggle into the E1–E8 eval
-  suite (seeded-bug stimulus set, surface A/B).
+- **P3 (M11, done)**: the `digest` resource takes a `budget` param and returns
+  per-severity totals (ticks coalesced into a count) + at most `budget` of the
+  most-recent notable traps, newest first, with an `elided` count — a summary,
+  not the firehose. The autonomy dial (`set_autonomy` tool) makes the kernel
+  self-manage attention: at `autonomous` it suppresses trace-severity tick
+  *frames* from the wire (still counting them + checking deadlines), leaving the
+  digest to pull on demand. Both are `traps.rs` state + `rpc.rs` verbs.
+- **E1–E8 (M12, next)**: wire the M9 two-surface toggle into an actual A/B eval
+  harness over a seeded-bug stimulus set (E1 headline), plus E2/E3/E5. The eval
+  suite ships as the public benchmark; the MCP surface as the published spec.

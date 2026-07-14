@@ -486,3 +486,22 @@ resource matter (returns `EAGAIN`/`ENOMEM` on slot/frame exhaustion). Left
 ungated: snapshot is a self-service checkpoint primitive, and gating it would
 need a `CAP_SNAPSHOT` bit threaded through the images + fixtures for no security
 gain today. Revisit if snapshot authority ever needs delegating.
+
+**2026-07-14 · M11 · Autonomy dial + P3 token-budgeted digest, both control-plane toggles; ticks suppressed at the frame layer only.**
+P3 ("operator attention is the scarce resource"): observability endpoints
+accept a budget and return a summary, not a firehose. Implemented as a `digest`
+resource that takes a `budget` param and returns per-severity totals (every
+timer tick collapsed into a count) plus at most `budget` of the most-recent
+NOTABLE traps (faults, syscalls), newest first, with an `elided` count. A small
+tick-proof NOTABLE ring (4 entries) guarantees a fault stays surfaced no matter
+how many ticks follow it, and severity ranking (fault=error, ecall=info,
+tick=trace) means a small budget preserves the high-severity events. The
+autonomy dial (`set_autonomy {reactive|autonomous}`, mirror of `set_surface`):
+at autonomous the kernel judges trace-severity tick FRAMES not worth the
+operator's token budget and suppresses them from the wire — but only the frame
+emission is gated; `TICKS` still increments, the timer is still re-armed, and
+payload deadline checks still run, so determinism and the deadline kill are
+untouched. Default is reactive, so every existing check (m2/hardening/
+determinism, which depend on tick frames) is unaffected; only `m11` flips the
+dial. Chosen a runtime dial over a build flag for the same reason as the M9
+surface twin: one binary, one recorded session can exercise both modes.
