@@ -328,3 +328,59 @@ exercising input at four widely-separated instruction counts; replay reproduces
 every frame bit-for-bit. This keeps the serial layer dumb (no echo) and the
 kernel unchanged — determinism is a property of the QEMU invocation (P9), where
 it belongs.
+
+**2026-07-14 · M8 · PROVISIONAL · MCP/JSON-RPC rides inside the existing length-prefixed frames (not newline-delimited); each response is wrapped in a stream-id envelope.**
+RFC open question: "MCP framing over virtio-serial: newline-delimited JSON-RPC
+vs. length-prefixed." Chosen: length-prefixed, reusing the exact outbound frame
+(`AA 99 | u32 LE len | UTF-8`) for inbound too — one framing for both
+directions keeps the serial layer dumb (P-serial) and lets the host reuse
+`encode_frame`. JSON-RPC 2.0 request objects go in the frame body. Responses
+are emitted as ordinary event frames wrapped `{"id":<stream>,"type":"rpc","rpc":{…}}`:
+the kernel's invariant that every frame carries a strictly-monotonic stream id
+(the P12 causal spine and the determinism anchor) must hold for control traffic
+too, so the JSON-RPC object — with its own correlation `id` — nests inside
+`rpc`. A strict-MCP client reads `.rpc`; the envelope is our transport detail.
+Alternative (make every event a JSON-RPC notification, no envelope) was rejected
+for M8: it would rewrite every emit site and every runner check and risk
+regressing M0–M7 for no functional gain. Revisit at M9+ if a real external MCP
+client needs the pure stream.
+
+**2026-07-14 · M8 · Single command bytes stay as a compat/fallback control plane alongside JSON-RPC.**
+`idle` still honors `r/x/p/m/i/f`; a leading `0xAA` switches that byte into the
+framed-request reader. Keeping both means M0–M7 checks, `make demo`, and the
+determinism/replay gates are untouched, and the byte plane remains a
+zero-dependency operator escape hatch. The two never collide: command bytes are
+printable ASCII, `0xAA` cannot begin one.
+
+**2026-07-14 · M8 · Transport-level junk is silently dropped and resynced; only structurally-valid JSON requests get a response.**
+A stray `0xAA` in the byte stream (the input-hardening test injects `AA 99` +
+garbage on purpose) must not hang or answer. The reader drops silently on: a
+second byte that isn't `0x99`, an implausible length (0 or > 512 — and it does
+NOT drain a bogus multi-GiB length, which would hang), non-UTF-8 bodies, and
+bodies that aren't a JSON object. Only a well-formed frame carrying `{…}` is
+dispatched, and only then are JSON-RPC-level problems (unknown method/tool/
+suite) answered with an error object — because that frame *was* a real client
+request. This preserves P-serial ("garbage bytes are ignored") and the
+hardening invariant that noise produces only hello/tick frames, mirroring the
+host decoder's skip-and-rescan on an implausible length.
+
+**2026-07-14 · M8 · PROVISIONAL · `resources/read` returns the resource JSON as the result directly, not MCP's `contents[].text` string-wrapping.**
+Strict MCP wraps a resource read as `{"contents":[{"text":"<stringified json>"}]}`.
+Stringifying a whole JSON document (escaping every quote) in no_std with a fixed
+FrameBuf is wasteful and error-prone, so `resources/read` returns the decoded
+resource object as the JSON-RPC `result` directly (e.g. the `spec` object). The
+wire spec we would publish uses direct JSON; a strict-MCP shim can re-wrap it
+host-side. `tools/call run_suite` is likewise async: it returns
+`{"status":"accepted"}` immediately and the suite's own event frames stream out,
+with the terminal `suite_done` as the completion signal (the kernel's scheduler
+`run()` diverges, so a synchronous "return the result after running" is not
+possible without threading state through the scheduler — deferred).
+
+**2026-07-14 · M8 · Idempotency via client `opId`: a replayed mutating call runs once (RFC P4 retry-safety).**
+`tools/call` may carry `params.opId`. The kernel keeps an 8-slot FIFO of FNV-1a
+hashes of seen opIds; a call whose opId is already present is answered
+`{"status":"duplicate"}` without re-executing. Agents replay, double-fire, and
+lose connections (RFC), so a `run_suite`/`crash` that arrives twice must not run
+twice. 8 slots is a deliberate small window (the fixture double-fires
+back-to-back); a production window would be larger and possibly response-caching,
+logged here rather than blocking M8.

@@ -4,7 +4,7 @@ An agent-native RISC-V unikernel. See `docs/RFC-001-agent-native-kernel.md` for
 the thesis and `CLAUDE.md` for working conventions. New here — or new to
 kernels entirely? Start with `docs/WALKTHROUGH.md`, then run `make demo`.
 
-Current state: **M7** — boot, traps, SBI timer, trap ring, structured fault
+Current state: **M8** — boot, traps, SBI timer, trap ring, structured fault
 reports (M0–M2); U-mode payloads running to `sys_exit`, a payload crash kills
 only the payload (M3); a capability-gated syscall surface with spawn
 attenuation and instruction-count deadline kill (M4); per-payload Sv39 paging
@@ -12,8 +12,10 @@ giving real memory isolation and W^X, with page-table walks in fault reports
 (M5); checkpoint/restore and speculative fork — a payload checkpoints itself
 and the kernel forks independent continuations (M6, P8); deterministic replay
 of a full operator session — record the serial input, replay it with none, get
-a bit-identical event stream (M7, E6). See `docs/HANDOFF.md` for the exact next
-step (M8: MCP control plane).
+a bit-identical event stream (M7, E6); an MCP/JSON-RPC control plane inside the
+same frames — tools, resources, a self-describing `spec`, and idempotent
+mutating calls (M8, P4/P5). See `docs/HANDOFF.md` for the exact next step
+(M9: rich diagnostic frames + the surface-classic twin).
 
 ## Bootstrap (Ubuntu 24.04 or similar)
 
@@ -41,7 +43,8 @@ make demo    # narrated tour: boot, ticks, ring, payloads, sandbox, fault, deter
 make test    # full acceptance suite: framing (M0), boot (M1), traps/timer/fault
              # (M2), U-mode payloads (M3), caps/spawn/deadline (M4), paging/
              # isolation (M5), checkpoint/fork (M6), deterministic replay (M7),
-             # input hardening, determinism, demo — plus unsafe budget; CI runs this
+             # MCP control plane (M8), input hardening, determinism, demo —
+             # plus unsafe budget; CI runs this
 make debug   # boot QEMU halted with a gdb stub on :1234
 make gdb     # attach gdb-multiarch to a running `make debug`
 ```
@@ -49,7 +52,10 @@ make gdb     # attach gdb-multiarch to a running `make debug`
 Once booted (`make run`), the kernel serves single-byte operator commands on
 the serial line: `r` dumps the trap ring, `x` crashes the kernel on purpose,
 `p` runs the M3 payload suite, `m` the M4 sandbox suite, `i` the M5 isolation
-suite, `f` the M6 checkpoint/fork suite.
+suite, `f` the M6 checkpoint/fork suite. A leading `0xAA` byte instead begins
+an MCP/JSON-RPC request frame (M8): the structured control plane those bytes
+are a stand-in for — `initialize`, `tools/list`, `tools/call`,
+`resources/read` (`trap_ring`, `processes`, and the self-describing `spec`).
 
 `make test` must pass from a fresh clone after the bootstrap above; if it
 doesn't, that is a bug.

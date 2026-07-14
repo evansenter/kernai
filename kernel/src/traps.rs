@@ -288,6 +288,19 @@ pub fn emit_ring_dump() {
     });
 }
 
+/// The ring as an MCP resource body: `{"count":N,"entries":[…]}`. Same data
+/// as `emit_ring_dump` but as a *value* the caller embeds in a JSON-RPC
+/// result (no envelope, no event id of its own) — the P4 `trap_ring` resource.
+pub fn write_ring_resource(f: &mut FrameBuf) -> core::fmt::Result {
+    write!(
+        f,
+        r#"{{"count":{},"entries":"#,
+        RING_COUNT.load(Ordering::Relaxed)
+    )?;
+    write_ring(f)?;
+    f.write_str("}")
+}
+
 /// The v0 diagnostic frame (P6): everything we know about the fault,
 /// structured. M9 grows this into the full frame (page-table walk, richer
 /// register file, causal parent), same event shape.

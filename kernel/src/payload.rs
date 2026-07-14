@@ -759,6 +759,89 @@ fn caps_json(f: &mut FrameBuf, caps: u32) {
     let _ = f.write_str("]");
 }
 
+fn state_name(s: u8) -> &'static str {
+    match s {
+        PENDING => "pending",
+        RUNNING => "running",
+        EXITED => "exited",
+        FAULTED => "faulted",
+        KILLED => "killed",
+        _ => "empty",
+    }
+}
+
+/// The process table as an MCP resource body (`processes`): every non-empty
+/// slot with its pid, image name, state, exit code, and CapSet. This is the
+/// P4 `/payloads` resource — the operator's view of what has run and how it
+/// ended, structured, not a printf dump.
+pub fn write_process_table(f: &mut FrameBuf) -> core::fmt::Result {
+    f.write_str(r#"{"processes":["#)?;
+    let mut first = true;
+    for (pid, slot) in TABLE.iter().enumerate() {
+        let st = slot.state.load(RE);
+        if st == EMPTY {
+            continue;
+        }
+        if !first {
+            f.write_str(",")?;
+        }
+        first = false;
+        let name = IMAGES
+            .get(slot.image.load(RE))
+            .map(|i| i.name)
+            .unwrap_or("?");
+        write!(
+            f,
+            r#"{{"pid":{pid},"name":"{name}","state":"{}","exit_code":{},"caps":"#,
+            state_name(st),
+            slot.exit_code.load(RE),
+        )?;
+        caps_json(f, slot.caps.load(RE));
+        f.write_str("}")?;
+    }
+    f.write_str("]}")
+}
+
+/// The self-describing surface (P5) as the MCP `spec` resource: the syscall
+/// table, the capability lattice, and the memory map — the contract an agent
+/// discovers instead of being handed a SPEC.md that drifts. Static: it is the
+/// kernel describing its own ABI.
+pub fn write_spec(f: &mut FrameBuf) -> core::fmt::Result {
+    use crate::syscall::{SYS_EXIT, SYS_SNAPSHOT, SYS_SPAWN, SYS_WRITE, SYS_YIELD};
+    f.write_str(r#"{"proto":0,"arch":"riscv64","syscalls":["#)?;
+    let syscalls: [(u64, &str); 5] = [
+        (SYS_EXIT, "exit"),
+        (SYS_WRITE, "write"),
+        (SYS_YIELD, "yield"),
+        (SYS_SPAWN, "spawn"),
+        (SYS_SNAPSHOT, "snapshot"),
+    ];
+    for (i, (num, name)) in syscalls.iter().enumerate() {
+        if i > 0 {
+            f.write_str(",")?;
+        }
+        write!(f, r#"{{"num":{num},"name":"{name}"}}"#)?;
+    }
+    f.write_str(r#"],"caps":["#)?;
+    let caps: [(&str, u32); 3] = [
+        ("write", CAP_WRITE),
+        ("yield", CAP_YIELD),
+        ("spawn", CAP_SPAWN),
+    ];
+    for (i, (name, bit)) in caps.iter().enumerate() {
+        if i > 0 {
+            f.write_str(",")?;
+        }
+        write!(f, r#"{{"name":"{name}","bit":{bit}}}"#)?;
+    }
+    write!(
+        f,
+        r#"],"memory":{{"kernel_base":"0x80200000","pool_base":"0x{:x}","pool_end":"0x{:x}"}}}}"#,
+        hal::POOL_BASE,
+        hal::POOL_END,
+    )
+}
+
 fn emit_start(pid: usize, name: &str, caps: u32, entry: usize, restored: bool) {
     hal::without_interrupts(|| {
         let mut f = FrameBuf::new();

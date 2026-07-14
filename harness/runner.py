@@ -438,6 +438,107 @@ def m7_deterministic_replay():
     )
 
 
+@milestone("m8")
+def m8_mcp_control_plane():
+    """MCP control plane (P4): the kernel is driven purely over JSON-RPC 2.0
+    carried inside the same length-prefixed frames. `initialize`, `tools/list`,
+    `resources/list`/`read` (incl. the P5 self-describing `spec`), a
+    `tools/call run_suite` whose async events stream to `suite_done`,
+    client-opId idempotency (a replayed mutating call runs once), and
+    structured errors — all without a single command byte. Stream ids stay
+    strictly monotonic across control + event frames (the envelope invariant)."""
+    from .mcp import Mcp
+    from .qemu import QemuKernel
+
+    def drain_suite(q, seen):
+        """Read the async event stream a run_suite kicks off, up to suite_done."""
+        while True:
+            f = q.stream.next_frame(timeout=60)
+            assert f is not None, f"EOF before suite_done; stderr: {q.stderr_tail()}"
+            evt = json.loads(f)
+            seen.append(evt)
+            if evt["type"] == "suite_done":
+                return evt
+
+    with QemuKernel() as q:
+        seen = [json.loads(q.stream.next_frame(timeout=60))]  # boot hello
+        assert seen[0]["type"] == "hello"
+        m = Mcp(q)
+
+        # MCP handshake.
+        init = m.result("initialize", collect=seen)
+        assert init["serverInfo"]["name"] == "kernai", f"bad serverInfo: {init}"
+        assert init["protocolVersion"], f"no protocolVersion: {init}"
+        assert "tools" in init["capabilities"] and "resources" in init["capabilities"]
+
+        # Tools and resources are discoverable (agents discover, not documented).
+        tools = {t["name"] for t in m.result("tools/list", collect=seen)["tools"]}
+        assert {"run_suite", "crash", "ring_read"} <= tools, f"missing tools: {tools}"
+        resources = {r["uri"] for r in m.result("resources/list", collect=seen)["resources"]}
+        assert {"trap_ring", "processes", "spec"} <= resources, f"missing resources: {resources}"
+
+        # P5 self-describing surface: the kernel emits its own ABI.
+        spec = m.result("resources/read", {"uri": "spec"}, collect=seen)
+        sysnames = {s["name"] for s in spec["syscalls"]}
+        assert {"exit", "write", "spawn", "snapshot"} <= sysnames, f"spec syscalls: {spec}"
+        capnames = {c["name"] for c in spec["caps"]}
+        assert {"write", "spawn"} <= capnames, f"spec caps: {spec}"
+        assert spec["memory"]["pool_base"] == "0x80400000", f"spec memory: {spec}"
+
+        # tools/call run_suite is async: accepted now, events then stream out.
+        acc = m.result("tools/call", {"name": "run_suite", "arguments": {"suite": "p"}},
+                       collect=seen)
+        assert acc["status"] == "accepted" and acc["suite"] == "p", f"bad accept: {acc}"
+        done = drain_suite(q, seen)
+        assert done["exited"] == 1 and done["faulted"] == 1, f"suite result: {done}"
+        types = {e["type"] for e in seen}
+        assert {"payload_start", "payload_output", "payload_exit", "fault"} <= types
+
+        # The process table resource reflects what ran and how it ended.
+        procs = {p["name"]: p for p in
+                 m.result("resources/read", {"uri": "processes"}, collect=seen)["processes"]}
+        assert procs["hello"]["state"] == "exited" and procs["hello"]["exit_code"] == 0
+        assert procs["crasher"]["state"] == "faulted", f"crasher state: {procs}"
+
+        # Idempotency (P4): a mutating call carrying a client opId runs exactly
+        # once; a replay of the same opId is acknowledged without re-executing.
+        m.result("tools/call",
+                 {"name": "run_suite", "arguments": {"suite": "i"}, "opId": "isolation-1"},
+                 collect=seen)
+        drain_suite(q, seen)  # first fire runs the suite
+        mark = len(seen)
+        dup = m.call("tools/call",
+                     {"name": "run_suite", "arguments": {"suite": "i"}, "opId": "isolation-1"},
+                     collect=seen)
+        assert dup["result"]["status"] == "duplicate", f"replay re-ran: {dup}"
+        # Nothing collected during the duplicate call is a payload start — the
+        # suite genuinely did not run a second time (only ticks + the response).
+        assert not any(e.get("type") == "payload_start" for e in seen[mark:]), \
+            "duplicate opId re-executed the suite"
+
+        # Structured errors, kernel stays alive (a bad request is an event).
+        assert m.call("bogus/method", collect=seen)["error"]["code"] == -32601
+        assert m.call("tools/call", {"name": "nope"}, collect=seen)["error"]["code"] == -32602
+        assert m.call("tools/call", {"name": "run_suite", "arguments": {"suite": "zzz"}},
+                      collect=seen)["error"]["code"] == -32602
+
+        # The envelope invariant holds across every frame — control and event
+        # alike carry a strictly increasing stream id (P12 spine, determinism).
+        ids = [e["id"] for e in seen]
+        assert ids == sorted(set(ids)), f"stream ids not strictly monotonic: {ids}"
+
+        # The crash tool ends the session: fault → SBI shutdown → EOF.
+        m.send("tools/call", {"name": "crash"})
+        saw_fault = False
+        while True:
+            f = q.stream.next_frame(timeout=60)
+            if f is None:
+                break
+            if json.loads(f).get("type") == "fault":
+                saw_fault = True
+        assert saw_fault, "crash tool did not produce a fault before shutdown"
+
+
 @milestone("determinism")
 def determinism_two_boots():
     """P9 seed (E6): two input-free boots yield byte-identical event streams."""

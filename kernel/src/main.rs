@@ -13,6 +13,7 @@ mod frames;
 mod hal;
 mod mm;
 mod payload;
+mod rpc;
 mod syscall;
 mod traps;
 
@@ -49,9 +50,13 @@ pub fn kmain(_hartid: usize, _dtb: usize) -> ! {
 ///   'm' → run the M4 payload suite (caps, spawn attenuation, deadline kill)
 ///   'i' → run the M5 isolation suite (out-of-bounds, W^X, kernel-access faults)
 ///   'f' → run the M6 checkpoint suite (snapshot + speculative fork)
+///   0xAA → the start of an MCP/JSON-RPC request frame (M8, P4): the same
+///          length-prefixed envelope as an outbound event, JSON-RPC inside.
+///          Single bytes remain the compat/fallback control plane.
 pub fn idle() -> ! {
     loop {
         match hal::console_getchar() {
+            Some(0xAA) => rpc::read_request(),
             Some(b'r') => traps::emit_ring_dump(),
             Some(b'x') => hal::trigger_illegal_instruction(),
             Some(b'p') => {

@@ -8,6 +8,7 @@ import subprocess
 import sys
 import time
 
+from .mcp import Mcp
 from .qemu import KERNEL_ELF, QemuKernel
 
 FAST = "--fast" in sys.argv
@@ -61,7 +62,7 @@ machine-readable JSON events instead of human log lines — because its
 intended operator is an AI agent, not a person at a terminal.
 """)
 
-    say("[1/9] Booting an emulated RISC-V computer...")
+    say("[1/10] Booting an emulated RISC-V computer...")
     note("""
 QEMU emulates the whole machine: CPU, memory, a serial port (think: a wire
 for bytes). A small piece of firmware called OpenSBI (the machine's
@@ -78,7 +79,7 @@ Every event is JSON with a globally increasing "id". The hello frame is the
 kernel saying "I'm alive, I speak protocol 0".
 """)
 
-        say("[2/9] Watching the kernel's heartbeat (timer interrupts)...")
+        say("[2/10] Watching the kernel's heartbeat (timer interrupts)...")
         note("""
 The kernel asked the hardware for a timer that fires every 10,000 timebase
 units — under deterministic emulation that is exactly every 500,000 CPU
@@ -95,7 +96,7 @@ tick event.
 increase in lockstep — the event stream is the kernel's diary.
 """)
 
-        say("[3/9] Asking the kernel what happened recently (introspection)...")
+        say("[3/10] Asking the kernel what happened recently (introspection)...")
         note("""
 Classic kernels keep their internal state hidden — you attach a debugger to
 see it. This kernel's design principle P11 says: no state observable only
@@ -112,7 +113,7 @@ CPU was interrupted. This is the seed of the kernel-as-queryable-database
 idea the whole project is built around.
 """)
 
-        say("[4/9] Running a user program under the kernel...")
+        say("[4/10] Running a user program under the kernel...")
         note("""
 So far everything has been the kernel itself. Now we send 'p' to load two
 small *user* programs — separate compiled binaries — and run them in
@@ -152,7 +153,7 @@ user program crashing is an event, not a catastrophe (principle P1).
         show(get(q, "suite_done"))
         note('suite_done: one program exited cleanly, one faulted. The kernel is fine.')
 
-        say("[5/9] The sandbox: capabilities, delegation, and runaway control...")
+        say("[5/10] The sandbox: capabilities, delegation, and runaway control...")
         note("""
 Send 'm' for four more programs that show the kernel enforcing policy:
   • a "muzzled" program with NO capabilities tries to print — denied
@@ -198,7 +199,7 @@ machine by spinning. Because time here is measured in instructions, not
 the wall clock, this kill happens at the EXACT same point every single run.
 """)
 
-        say("[6/9] Memory isolation: each program gets its own private memory...")
+        say("[6/10] Memory isolation: each program gets its own private memory...")
         note("""
 Send 'i'. Until now, nothing physically stopped a user program from reaching
 into the kernel's memory — there was no memory management unit (MMU) turned
@@ -238,7 +239,7 @@ faults killed only the offending program; the kernel ran a clean program
 right after, in its own fresh address space.
 """)
 
-        say("[7/9] Checkpoint and fork: saving and branching a running program...")
+        say("[7/10] Checkpoint and fork: saving and branching a running program...")
         note("""
 Send 'f'. A program called "forker" prints a line, then asks the kernel to
 *checkpoint* it — freeze its entire state (memory + registers). It keeps
@@ -281,7 +282,45 @@ check point, try a branch, and if it's bad, fork the checkpoint again and
 try another. It's cheap here because a unikernel owns the whole memory map.
 """)
 
-        say("[8/9] Deliberately crashing the kernel itself (the good part)...")
+        say("[8/10] Driving the kernel as an MCP server (structured control)...")
+        note("""
+Everything so far used single command bytes. But the kernel's real control
+plane (principle P4) speaks MCP — the same JSON-RPC protocol AI agents already
+use for tools — carried inside those same framed messages. Any agent SDK can
+drive it with zero glue. We do a normal MCP handshake, then ask it to describe
+itself and to report what has run.
+""")
+        mcp = Mcp(q)
+        init = mcp.result("initialize")
+        show({"serverInfo": init["serverInfo"], "protocolVersion": init["protocolVersion"]})
+        note("""
+initialize: the standard MCP handshake. The kernel identifies as an MCP server
+named "kernai". From here a generic MCP client knows how to talk to it.
+""")
+        tools = mcp.result("tools/list")
+        show({"tools": [t["name"] for t in tools["tools"]]})
+        note("""
+tools/list: the control operations, discoverable — not documented in a manual
+that drifts. "run_suite" runs a workload set, "crash" faults the kernel,
+"ring_read" reads the flight recorder. An agent learns the surface by asking.
+""")
+        spec = mcp.result("resources/read", {"uri": "spec"})
+        show({"syscalls": [s["name"] for s in spec["syscalls"]],
+              "caps": [c["name"] for c in spec["caps"]], "memory": spec["memory"]})
+        note("""
+The "spec" resource is the kernel describing its own ABI (principle P5): its
+system-call table, its capability lattice, its memory map. No SPEC.md to fall
+out of sync — the contract is queryable, live, from the kernel itself.
+""")
+        procs = mcp.result("resources/read", {"uri": "processes"})
+        show({"processes": [{"name": p["name"], "state": p["state"]} for p in procs["processes"]]})
+        note("""
+And the "processes" resource is the kernel's own view of every workload from
+the earlier acts and how each ended — exited, faulted, or killed. The kernel's
+internal state IS the operator's API (principle P11): no debugger required.
+""")
+
+        say("[9/10] Deliberately crashing the kernel itself (the good part)...")
         note("""
 Now we send 'x', which tells the kernel to execute an instruction that is
 forbidden by the CPU spec: writing to the read-only 'cycle' counter
@@ -309,7 +348,7 @@ Reading it like the kernel does:
         except subprocess.TimeoutExpired:
             raise AssertionError("kernel hung after fault report")
 
-    say("[9/9] Proving determinism (run it again, get identical bytes)...")
+    say("[10/10] Proving determinism (run it again, get identical bytes)...")
     note("""
 The emulator is configured so virtual time is computed from the instruction
 count (-icount), not the host clock. Same program + same inputs = the same
@@ -331,12 +370,15 @@ agent ever sees is exactly reproducible.
         show(json.loads(fa))
     say(f"Two fresh boots produced identical streams ({len(a)} frames compared).")
     note("""
-That's M0-M4: a kernel that boots, narrates itself in structured events,
-runs sandboxed user programs, enforces capabilities and delegation, kills
-runaways on an instruction budget, and reproduces byte-for-byte every run.
-Next up (M5): giving each program its own private memory map (paging), so
-several can be resident at once. See docs/WALKTHROUGH.md for the full guided
-tour and docs/RFC-001-agent-native-kernel.md for where this is going.
+That's M0-M8: a kernel that boots, narrates itself in structured events, runs
+sandboxed user programs in private address spaces (paging + W^X), enforces
+capabilities and delegation, kills runaways on an instruction budget,
+checkpoints and forks a running program, replays a recorded session
+byte-for-byte, and is driven as a self-describing MCP server. Next up (M9):
+richer diagnostic frames and a "classic" printf twin, to measure how much
+faster an agent debugs against structured events than against a log dump. See
+docs/WALKTHROUGH.md for the full guided tour and
+docs/RFC-001-agent-native-kernel.md for where this is going.
 """)
 
 

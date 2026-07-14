@@ -1,4 +1,4 @@
-# Architecture (current: M7)
+# Architecture (current: M8)
 
 One page, always accurate. Principles P1–P12 are defined in
 `RFC-001-agent-native-kernel.md`. Beginner-level narrative: `WALKTHROUGH.md`.
@@ -24,6 +24,7 @@ host (Python, stdlib only)                guest (qemu -machine virt, -icount)
  every payload table                      │ elf.rs   ELF64 loader → mapping   │
                                           │ syscall.rs ABI v0 dispatch (safe) │
                                           │ payload.rs proc table + scheduler │
+                                          │ rpc.rs   MCP/JSON-RPC dispatch    │
                                           │ console.rs FrameBuf  events.rs id │
                                           │ main.rs  kmain + idle command loop│
                                           └───────────────────────────────────┘
@@ -35,8 +36,10 @@ Boot → `kmain`: hello (event 0), assert kernel image ends below the frame
 pool, **enable Sv39 paging** (kernel identity gigapage; the kernel runs
 translated but transparently), install trap vector, arm timer, enter
 `idle()`. `idle` serves single-byte operator commands (P1 seed): `r` ring
-dump, `x` kernel illegal-instruction, `p`/`m`/`i` the M3/M4/M5 payload
-suites. The boot event stream stays identical to M2 — payloads only run
+dump, `x` kernel illegal-instruction, `p`/`m`/`i`/`f` the M3–M6 payload
+suites — and a leading `0xAA` byte switches into the MCP/JSON-RPC request
+reader (`rpc.rs`, M8/P4), the structured control plane the bytes were always a
+stand-in for. The boot event stream stays identical to M2 — payloads only run
 when asked.
 
 **Payload lifecycle** (sequential run-to-completion): the scheduler builds a
@@ -82,9 +85,18 @@ next. Queue drains → `suite_done` → `idle`.
 
 ## Attachment points for later principles
 
-- **P4 (MCP, M8)**: `FrameStream` reads any fd; virtio-serial replaces the
-  UART beneath it, JSON-RPC rides inside the same frames. Control ops map to
-  today's command bytes; `trap_ring`/process table become resources.
+- **P4/P5 (MCP, M8, done)**: JSON-RPC 2.0 (MCP method shapes) rides *inside*
+  the existing length-prefixed frames — a leading `0xAA` in the operator input
+  switches that byte into `rpc::read_request`, which reads the frame body and
+  dispatches (`rpc.rs`, all safe: a hand-rolled structural JSON reader over a
+  fixed grammar). Tools (`run_suite`, `crash`, `ring_read`) map to the command
+  bytes; resources (`trap_ring`, `processes`, and the P5 self-describing
+  `spec` — syscall table, cap lattice, memory map) expose kernel state.
+  Responses wrap in a `{"id":<stream>,"type":"rpc","rpc":{…}}` envelope so the
+  monotonic-stream-id invariant holds for control traffic. Mutating calls are
+  idempotent via a client `opId` (an 8-slot FIFO of seen hashes → a replay is
+  answered `duplicate`, never re-run). Transport junk is silently dropped and
+  resynced (P-serial). Single command bytes remain as a compat/fallback plane.
 - **P6 (M9)**: the payload `fault` frame already carries the page-table walk;
   M9 grows it further (richer registers, a `cause` parent id — P12) and adds
   the `surface-classic` printf twin for the E1 A/B.
@@ -102,6 +114,7 @@ next. Queue drains → `suite_done` → `idle`.
   the crash) is logged to an `rrfile`; replaying with no live input reproduces
   every event frame bit-for-bit (`runner.py::m7`). No kernel change — QEMU logs
   each input at the instruction count it was consumed and re-injects it there.
-- **P4 attachment stays open (M8, next)**: MCP/JSON-RPC over the same frames;
-  command bytes become request verbs, `trap_ring` + process table become
-  resources.
+- **P6/E1 (M9, next)**: the payload `fault` frame already carries the
+  page-table walk; M9 grows it (richer registers, a `cause` parent id — P12)
+  and adds the `surface-classic` printf twin so E1 can A/B how fast an agent
+  localizes a bug from structured frames vs. a log dump.
