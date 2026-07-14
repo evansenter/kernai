@@ -42,15 +42,20 @@ pub fn kmain(_hartid: usize, _dtb: usize) -> ! {
 /// `idle` must be reachable as a plain `-> !` continuation.
 ///   'r' → dump the trap ring (P11 seed)
 ///   'x' → deliberately execute a kernel illegal instruction (M2 accept. 3)
-///   'p' → run the U-mode payload suite (M3/M4)
+///   'p' → run the M3 payload suite (clean payload + a crash)
+///   'm' → run the M4 payload suite (caps, spawn attenuation, deadline kill)
 pub fn idle() -> ! {
     loop {
         match hal::console_getchar() {
             Some(b'r') => traps::emit_ring_dump(),
             Some(b'x') => hal::trigger_illegal_instruction(),
             Some(b'p') => {
-                payload::seed_suite();
+                payload::seed_suite_m3();
                 payload::run(); // diverges; returns here via the scheduler
+            }
+            Some(b'm') => {
+                payload::seed_suite_m4();
+                payload::run();
             }
             _ => hal::wait_for_interrupt(), // park until the next tick
         }

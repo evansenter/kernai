@@ -3,6 +3,13 @@
 version = 4
 
 [[package]]
+name = "child"
+version = "0.1.0"
+dependencies = [
+ "sys",
+]
+
+[[package]]
 name = "crasher"
 version = "0.1.0"
 dependencies = [
@@ -11,6 +18,27 @@ dependencies = [
 
 [[package]]
 name = "hello"
+version = "0.1.0"
+dependencies = [
+ "sys",
+]
+
+[[package]]
+name = "muzzled"
+version = "0.1.0"
+dependencies = [
+ "sys",
+]
+
+[[package]]
+name = "runaway"
+version = "0.1.0"
+dependencies = [
+ "sys",
+]
+
+[[package]]
+name = "spawner"
 version = "0.1.0"
 dependencies = [
  "sys",

@@ -20,6 +20,7 @@ pub const ENOSYS: isize = -1;
 pub const ENOCAP: isize = -2;
 pub const EFAULT: isize = -3;
 pub const EINVAL: isize = -4;
+pub const EAGAIN: isize = -5; // no free process slot
 
 /// What the trap handler should do after a syscall.
 pub enum Outcome {
@@ -47,7 +48,8 @@ pub fn dispatch(frame: &mut TrapFrame) -> Outcome {
 /// write(ptr, len): emit up to WRITE_QUOTA payload bytes as an untrusted
 /// output event. Requires Cap::WRITE. Returns bytes accepted, or errno.
 fn sys_write(ptr: usize, len: usize) -> isize {
-    if !payload::current_has(Cap::WRITE) {
+    if !payload::current_has(Cap::Write) {
+        payload::emit_denied("write", "write");
         return ENOCAP;
     }
     // P3/P7 quota seed: a hostile payload cannot flood the operator's
@@ -58,6 +60,3 @@ fn sys_write(ptr: usize, len: usize) -> isize {
         Err(()) => EFAULT,
     }
 }
-
-// Keep EINVAL referenced until spawn arg-validation grows (M4+ image args).
-const _: isize = EINVAL;

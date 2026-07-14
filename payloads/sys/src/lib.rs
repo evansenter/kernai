@@ -31,6 +31,14 @@ pub const SYS_WRITE: usize = 1;
 pub const SYS_YIELD: usize = 2;
 pub const SYS_SPAWN: usize = 3;
 
+// Capability bits (must match kernel/src/payload.rs).
+pub const CAP_WRITE: usize = 1 << 0;
+pub const CAP_YIELD: usize = 1 << 1;
+pub const CAP_SPAWN: usize = 1 << 2;
+
+// Spawnable image selectors (stable ABI; kernel maps these to images).
+pub const SPAWNABLE_CHILD: usize = 0;
+
 pub fn syscall(nr: usize, a0: usize, a1: usize, a2: usize) -> isize {
     let ret: isize;
     // SAFETY: `ecall` transfers to the kernel's trap handler, which returns
@@ -60,6 +68,13 @@ pub fn write(bytes: &[u8]) -> isize {
 
 pub fn yield_now() -> isize {
     syscall(SYS_YIELD, 0, 0, 0)
+}
+
+/// Spawn a sub-payload (`image` selector) requesting `caps`. The kernel
+/// attenuates the grant to a subset of our own capabilities (P10). Returns
+/// the child pid, or a negative errno.
+pub fn spawn(image: usize, caps: usize) -> isize {
+    syscall(SYS_SPAWN, image, caps, 0)
 }
 
 #[panic_handler]

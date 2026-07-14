@@ -11,7 +11,7 @@
 //! the scheduler between payloads; the two never run concurrently.
 
 use core::fmt::Write;
-use core::sync::atomic::{AtomicIsize, AtomicU8, AtomicU32, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicIsize, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use crate::console::FrameBuf;
 use crate::{elf, events, hal};
@@ -46,8 +46,6 @@ impl Cap {
             Cap::Spawn => CAP_SPAWN,
         }
     }
-    // kept public-ish for M4 write hook symmetry
-    pub const WRITE: Cap = Cap::Write;
 }
 
 // ---- Payload images (statically embedded) -------------------------------
@@ -55,29 +53,82 @@ impl Cap {
 struct Image {
     name: &'static str,
     elf: &'static [u8],
+    /// Ceiling of capabilities this image may ever hold.
     caps: u32,
+    /// Instruction-count deadline in timebase units (0 = none). Under
+    /// -icount, timebase is a deterministic instruction proxy (1 unit ≈ 50
+    /// instructions), so this is an instruction budget, not wall time (P9).
+    deadline: u64,
 }
 
 // build.rs sets these env vars to the payload ELF paths; the payload
 // workspace builds before the kernel (`make build`).
 static HELLO: &[u8] = include_bytes!(env!("PAYLOAD_HELLO"));
 static CRASHER: &[u8] = include_bytes!(env!("PAYLOAD_CRASHER"));
+static MUZZLED: &[u8] = include_bytes!(env!("PAYLOAD_MUZZLED"));
+static SPAWNER: &[u8] = include_bytes!(env!("PAYLOAD_SPAWNER"));
+static CHILD: &[u8] = include_bytes!(env!("PAYLOAD_CHILD"));
+static RUNAWAY: &[u8] = include_bytes!(env!("PAYLOAD_RUNAWAY"));
 
 static IMAGES: &[Image] = &[
     Image {
         name: "hello",
         elf: HELLO,
         caps: CAP_WRITE,
+        deadline: 0,
     },
     Image {
         name: "crasher",
         elf: CRASHER,
         caps: CAP_WRITE,
+        deadline: 0,
+    },
+    // muzzled: empty CapSet — its write must be refused.
+    Image {
+        name: "muzzled",
+        elf: MUZZLED,
+        caps: 0,
+        deadline: 0,
+    },
+    // spawner: may write and spawn, but NOT yield — so a child it spawns can
+    // never be granted yield (P10).
+    Image {
+        name: "spawner",
+        elf: SPAWNER,
+        caps: CAP_WRITE | CAP_SPAWN,
+        deadline: 0,
+    },
+    // child: may hold write+yield, but is granted only what its parent has.
+    Image {
+        name: "child",
+        elf: CHILD,
+        caps: CAP_WRITE | CAP_YIELD,
+        deadline: 0,
+    },
+    // runaway: spins forever; the deadline preempts it (~15k units ≈ 750k insns).
+    Image {
+        name: "runaway",
+        elf: RUNAWAY,
+        caps: CAP_WRITE,
+        deadline: 15_000,
     },
 ];
 
 const IMG_HELLO: usize = 0;
 const IMG_CRASHER: usize = 1;
+const IMG_MUZZLED: usize = 2;
+const IMG_SPAWNER: usize = 3;
+const IMG_CHILD: usize = 4;
+const IMG_RUNAWAY: usize = 5;
+
+/// Map a payload-supplied spawn selector (stable ABI, see payloads/sys) to an
+/// image index. Only images a payload is allowed to spawn appear here.
+fn spawnable_image(selector: usize) -> Option<usize> {
+    match selector {
+        0 => Some(IMG_CHILD), // sys::SPAWNABLE_CHILD
+        _ => None,
+    }
+}
 
 // ---- Process table ------------------------------------------------------
 
@@ -98,6 +149,10 @@ struct Slot {
     caps: AtomicU32,
     parent: AtomicUsize,
     exit_code: AtomicIsize,
+    /// Timebase value when this payload started running (for deadlines).
+    started_at: AtomicU64,
+    /// Instruction-count deadline in timebase units (0 = none).
+    deadline: AtomicU64,
 }
 
 impl Slot {
@@ -108,6 +163,8 @@ impl Slot {
             caps: AtomicU32::new(0),
             parent: AtomicUsize::new(NO_PID),
             exit_code: AtomicIsize::new(0),
+            started_at: AtomicU64::new(0),
+            deadline: AtomicU64::new(0),
         }
     }
 }
@@ -126,14 +183,27 @@ pub fn assert_arena_clear() {
     );
 }
 
-/// Seed the run queue with the acceptance suite (operator-triggered by 'p').
-/// Clears any prior run's terminal slots first.
-pub fn seed_suite() {
+fn clear_table() {
     for slot in TABLE.iter() {
         slot.state.store(EMPTY, RE);
     }
+}
+
+/// M3 suite (operator-triggered by 'p'): a clean payload and a crashing one.
+pub fn seed_suite_m3() {
+    clear_table();
     enqueue(IMG_HELLO, IMAGES[IMG_HELLO].caps, NO_PID);
     enqueue(IMG_CRASHER, IMAGES[IMG_CRASHER].caps, NO_PID);
+}
+
+/// M4 suite (operator-triggered by 'm'): capability enforcement, spawn
+/// attenuation, and deadline kill. `spawner` adds `child` to the queue at
+/// run time.
+pub fn seed_suite_m4() {
+    clear_table();
+    enqueue(IMG_MUZZLED, IMAGES[IMG_MUZZLED].caps, NO_PID);
+    enqueue(IMG_SPAWNER, IMAGES[IMG_SPAWNER].caps, NO_PID);
+    enqueue(IMG_RUNAWAY, IMAGES[IMG_RUNAWAY].caps, NO_PID);
 }
 
 fn enqueue(image: usize, caps: u32, parent: usize) -> Option<usize> {
@@ -143,6 +213,8 @@ fn enqueue(image: usize, caps: u32, parent: usize) -> Option<usize> {
             slot.caps.store(caps & IMAGES[image].caps, RE);
             slot.parent.store(parent, RE);
             slot.exit_code.store(0, RE);
+            slot.deadline.store(IMAGES[image].deadline, RE);
+            slot.started_at.store(0, RE);
             slot.state.store(PENDING, RE);
             return Some(pid);
         }
@@ -182,6 +254,7 @@ fn start(pid: usize) -> ! {
     match elf::load(img.elf) {
         Ok(entry) => {
             TABLE[pid].state.store(RUNNING, RE);
+            TABLE[pid].started_at.store(hal::read_time(), RE);
             CURRENT.store(pid, RE);
             emit_start(pid, img.name, TABLE[pid].caps.load(RE), entry);
             hal::enter_user(entry)
@@ -227,20 +300,83 @@ pub fn mark_faulted() {
 }
 
 /// Called from the timer handler. Returns true if the current payload has
-/// exhausted its instruction-count deadline and should be killed. M3 has no
-/// deadlines (returns false); M4 wires the budget check here.
+/// exhausted its instruction-count deadline and must be killed (P1/P2): a
+/// runaway payload becomes a structured event, not a hung machine.
 pub fn on_tick() -> bool {
-    false
+    let pid = match current_pid() {
+        Some(p) => p,
+        None => return false,
+    };
+    let deadline = TABLE[pid].deadline.load(RE);
+    if deadline == 0 {
+        return false;
+    }
+    let elapsed = hal::read_time().saturating_sub(TABLE[pid].started_at.load(RE));
+    if elapsed > deadline {
+        TABLE[pid].state.store(KILLED, RE);
+        emit_killed(pid, elapsed, deadline);
+        true
+    } else {
+        false
+    }
 }
 
-/// M4 implements cooperative yield and capability-attenuated spawn; in M3
-/// they are unimplemented so payloads that call them see ENOSYS.
+/// Cooperative yield. Requires Cap::Yield. Pre-paging there is only one
+/// resident payload, so a yield has nothing to switch to — it emits an event
+/// and resumes the caller. Real rescheduling arrives with M5's per-payload
+/// address spaces; the syscall + cap gate are wired now.
 pub fn on_yield() -> isize {
-    crate::syscall::ENOSYS
+    if !current_has(Cap::Yield) {
+        emit_denied("yield", "yield");
+        return crate::syscall::ENOCAP;
+    }
+    if let Some(pid) = current_pid() {
+        emit_yield(pid);
+    }
+    0
 }
 
-pub fn on_spawn(_image: usize, _caps: u32) -> isize {
-    crate::syscall::ENOSYS
+/// Spawn a sub-payload (P10). Requires Cap::Spawn. The child's CapSet is
+/// attenuated to `requested & parent_caps & image_ceiling` — a delegation
+/// chain can never widen. Returns the child pid or a negative errno.
+pub fn on_spawn(selector: usize, requested_caps: u32) -> isize {
+    let parent = match current_pid() {
+        Some(p) => p,
+        None => return crate::syscall::EINVAL,
+    };
+    if !current_has(Cap::Spawn) {
+        emit_denied("spawn", "spawn");
+        return crate::syscall::ENOCAP;
+    }
+    let image = match spawnable_image(selector) {
+        Some(i) => i,
+        None => return crate::syscall::EINVAL,
+    };
+    let parent_caps = TABLE[parent].caps.load(RE);
+    // The attenuation lattice: granted ⊆ parent, always.
+    let granted = requested_caps & parent_caps & IMAGES[image].caps;
+    match enqueue(image, granted, parent) {
+        Some(child) => {
+            emit_spawn(parent, child, IMAGES[image].name, requested_caps, granted);
+            child as isize
+        }
+        None => crate::syscall::EAGAIN,
+    }
+}
+
+/// Emit a structured capability-denied event (P1/P6): a refused syscall is a
+/// first-class event, not just an errno the payload may swallow.
+pub fn emit_denied(syscall: &str, cap: &str) {
+    let pid = current_pid().unwrap_or(NO_PID);
+    hal::without_interrupts(|| {
+        let mut f = FrameBuf::new();
+        let _ = write!(
+            f,
+            r#"{{"id":{},"type":"syscall_denied","pid":{pid},"syscall":"{syscall}","reason":"missing_cap","cap":"{cap}"}}"#,
+            events::next_id()
+        );
+        f.emit();
+    });
 }
 
 /// Copy `len` bytes of payload memory at virtual `ptr` and emit them as an
@@ -330,28 +466,71 @@ fn emit_load_fault(pid: usize, name: &str, reason: &str) {
     });
 }
 
-fn emit_suite_done() {
+fn emit_yield(pid: usize) {
     hal::without_interrupts(|| {
         let mut f = FrameBuf::new();
-        let mut ran = 0;
-        let mut faulted = 0;
-        for slot in TABLE.iter() {
-            match slot.state.load(RE) {
-                EXITED => ran += 1,
-                FAULTED | KILLED => faulted += 1,
-                _ => {}
-            }
-        }
         let _ = write!(
             f,
-            r#"{{"id":{},"type":"suite_done","exited":{ran},"faulted":{faulted}}}"#,
+            r#"{{"id":{},"type":"payload_yield","pid":{pid}}}"#,
             events::next_id()
         );
         f.emit();
     });
 }
 
-// Keep the yet-unused cap variants/consts referenced so M4 wiring compiles
-// cleanly and clippy stays quiet without allow-dead-code littering.
-const _: (u32, u32) = (CAP_YIELD, CAP_SPAWN);
-const _: [Cap; 2] = [Cap::Yield, Cap::Spawn];
+/// The delegation event (P10): both the requested and the granted CapSets so
+/// an operator can see attenuation happen — granted is always a subset.
+fn emit_spawn(parent: usize, child: usize, name: &str, requested: u32, granted: u32) {
+    hal::without_interrupts(|| {
+        let mut f = FrameBuf::new();
+        let _ = write!(
+            f,
+            r#"{{"id":{},"type":"payload_spawn","parent":{parent},"child":{child},"name":"{name}","requested":"#,
+            events::next_id()
+        );
+        caps_json(&mut f, requested);
+        let _ = f.write_str(r#","granted":"#);
+        caps_json(&mut f, granted);
+        let _ = f.write_str(r#","attenuated":"#);
+        let _ = f.write_str(if requested != granted {
+            "true"
+        } else {
+            "false"
+        });
+        let _ = f.write_str("}");
+        f.emit();
+    });
+}
+
+fn emit_killed(pid: usize, elapsed: u64, deadline: u64) {
+    hal::without_interrupts(|| {
+        let mut f = FrameBuf::new();
+        let _ = write!(
+            f,
+            r#"{{"id":{},"type":"payload_killed","pid":{pid},"reason":"deadline","elapsed":{elapsed},"deadline":{deadline}}}"#,
+            events::next_id()
+        );
+        f.emit();
+    });
+}
+
+fn emit_suite_done() {
+    hal::without_interrupts(|| {
+        let mut f = FrameBuf::new();
+        let (mut exited, mut faulted, mut killed) = (0, 0, 0);
+        for slot in TABLE.iter() {
+            match slot.state.load(RE) {
+                EXITED => exited += 1,
+                FAULTED => faulted += 1,
+                KILLED => killed += 1,
+                _ => {}
+            }
+        }
+        let _ = write!(
+            f,
+            r#"{{"id":{},"type":"suite_done","exited":{exited},"faulted":{faulted},"killed":{killed}}}"#,
+            events::next_id()
+        );
+        f.emit();
+    });
+}

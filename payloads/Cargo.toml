@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["sys", "hello", "crasher"]
+members = ["sys", "hello", "crasher", "muzzled", "spawner", "child", "runaway"]
 
 [profile.release]
 panic = "abort"
