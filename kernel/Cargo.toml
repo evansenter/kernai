@@ -8,6 +8,13 @@ edition = "2024"
 # chain stays empty.
 [dependencies]
 
+# Optional: embed C-language payloads (the craycast raycaster). Off by default
+# so the standard build + `make test` stay pure Rust with no C toolchain; the
+# `make raycast` target turns it on. Enabling it needs clang + lld (rv64) and
+# the C payload prebuilt (payloads/build_c.sh, run by the Makefile).
+[features]
+cpayloads = []
+
 [profile.release]
 panic = "abort"
 lto = true

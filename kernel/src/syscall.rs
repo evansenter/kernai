@@ -15,6 +15,7 @@ pub const SYS_WRITE: u64 = 1;
 pub const SYS_YIELD: u64 = 2;
 pub const SYS_SPAWN: u64 = 3;
 pub const SYS_SNAPSHOT: u64 = 4;
+pub const SYS_BLIT: u64 = 5;
 
 // errno-style returns (negative). Kept few and structured.
 pub const ENOSYS: isize = -1;
@@ -44,6 +45,7 @@ pub fn dispatch(frame: &mut TrapFrame) -> Outcome {
         SYS_YIELD => Outcome::Resume(payload::on_yield()),
         SYS_SPAWN => Outcome::Resume(payload::on_spawn(a0, a1 as u32)),
         SYS_SNAPSHOT => Outcome::Resume(payload::on_snapshot(frame)),
+        SYS_BLIT => Outcome::Resume(payload::on_blit(a0, a1, frame.a2() as usize)),
         _ => Outcome::Resume(ENOSYS),
     }
 }

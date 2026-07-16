@@ -99,6 +99,13 @@ static DELEGATOR: &[u8] = include_bytes!(env!("PAYLOAD_DELEGATOR"));
 static REDELEGATOR: &[u8] = include_bytes!(env!("PAYLOAD_REDELEGATOR"));
 static WORKER: &[u8] = include_bytes!(env!("PAYLOAD_WORKER"));
 static BADJUMP: &[u8] = include_bytes!(env!("PAYLOAD_BADJUMP"));
+// craycast is a C payload (the `cpayloads` cargo feature); the default build is
+// pure Rust and needs no C toolchain, so its bytes are empty and its suite —
+// the only thing that loads it — is compiled out.
+#[cfg(feature = "cpayloads")]
+static CRAYCAST: &[u8] = include_bytes!(env!("PAYLOAD_CRAYCAST"));
+#[cfg(not(feature = "cpayloads"))]
+static CRAYCAST: &[u8] = &[];
 
 static IMAGES: &[Image] = &[
     Image {
@@ -199,6 +206,15 @@ static IMAGES: &[Image] = &[
         caps: CAP_WRITE,
         deadline: 0,
     },
+    // craycast: a C-language fixed-point raycaster (the `cpayloads` feature). Its
+    // ELF is empty on the default (pure-Rust) build; only seed_suite_craycast
+    // loads it, and that is compiled out unless the feature is on.
+    Image {
+        name: "craycast",
+        elf: CRAYCAST,
+        caps: CAP_WRITE,
+        deadline: 0,
+    },
 ];
 
 const IMG_HELLO: usize = 0;
@@ -215,6 +231,8 @@ const IMG_DELEGATOR: usize = 10;
 const IMG_REDELEGATOR: usize = 11;
 const IMG_WORKER: usize = 12;
 const IMG_BADJUMP: usize = 13;
+#[cfg(feature = "cpayloads")]
+const IMG_CRAYCAST: usize = 14;
 
 /// Map a payload-supplied spawn selector (stable ABI, see payloads/sys) to an
 /// image index. Only images a payload is allowed to spawn appear here.
@@ -415,6 +433,15 @@ pub fn seed_suite_eval() {
     enqueue(IMG_WILD, IMAGES[IMG_WILD].caps, NO_PID);
     enqueue(IMG_WXVIOL, IMAGES[IMG_WXVIOL].caps, NO_PID);
     enqueue(IMG_BADJUMP, IMAGES[IMG_BADJUMP].caps, NO_PID);
+}
+
+/// craycast suite (operator 'c', `cpayloads` feature): the C raycaster. It
+/// renders a maze in first person and blits each frame via SYS_BLIT — a real,
+/// non-Rust workload proving the C toolchain + a framebuffer-as-event surface.
+#[cfg(feature = "cpayloads")]
+pub fn seed_suite_craycast() {
+    clear_table();
+    enqueue(IMG_CRAYCAST, IMAGES[IMG_CRAYCAST].caps, NO_PID);
 }
 
 fn enqueue(image: usize, caps: u32, parent: usize) -> Option<usize> {
@@ -824,6 +851,83 @@ pub fn emit_output(ptr: usize, len: usize) -> Result<(), ()> {
     Ok(())
 }
 
+// ---- blit (SYS_BLIT): the framebuffer as a deterministic event -----------
+
+/// Shade ramp: framebuffer byte (0..255) → an ASCII glyph. All glyphs are
+/// JSON-safe (no `"`/`\`/control), so rows go straight into a JSON string.
+const RAMP: [&str; 10] = [" ", ".", ":", "-", "=", "+", "*", "#", "%", "@"];
+/// Output caps chosen so even the largest accepted ASCII frame fits one
+/// FrameBuf (2 KiB): 72×24 → ~1.8 KiB with the header. A payload asking for
+/// more is refused (EINVAL), never silently dropped, and `overflowed()` is a
+/// second backstop.
+const BLIT_MAXW: usize = 72;
+const BLIT_MAXH: usize = 24;
+
+/// `blit(ptr, w, h)`: a payload hands the kernel a `w×h` byte framebuffer in
+/// its own address space; the kernel reads it **through the payload's page
+/// table** (a bad pointer is EFAULT, never a kernel read — the same
+/// confused-deputy defense as `write`), maps each byte to an ASCII glyph, and
+/// emits a `frame` event with an FNV checksum of the raw bytes. Under -icount
+/// the same run yields byte-identical frames + checksums (P9). Requires
+/// `Cap::Write`. This is the "display as an event/resource" seam a doomgeneric
+/// port would render into.
+pub fn on_blit(ptr: usize, w: usize, h: usize) -> isize {
+    if !current_has(Cap::Write) {
+        emit_denied("blit", "write");
+        return crate::syscall::ENOCAP;
+    }
+    if w == 0 || h == 0 || w > BLIT_MAXW || h > BLIT_MAXH {
+        return crate::syscall::EINVAL;
+    }
+    let space = match current_space() {
+        Some(s) => s,
+        None => return crate::syscall::EINVAL,
+    };
+    let pid = current_pid().unwrap_or(NO_PID);
+    let mut ok = true;
+    let mut overflow = false;
+    hal::without_interrupts(|| {
+        let mut f = FrameBuf::new();
+        let _ = write!(
+            f,
+            r#"{{"id":{},"type":"frame","pid":{pid},"untrusted":true,"w":{w},"h":{h},"rows":["#,
+            events::next_id()
+        );
+        let mut checksum: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut row = [0u8; BLIT_MAXW];
+        for y in 0..h {
+            if y > 0 {
+                let _ = f.write_str(",");
+            }
+            let _ = f.write_str("\"");
+            if !space.copy_from_user(ptr.wrapping_add(y * w), &mut row[..w]) {
+                ok = false;
+                break;
+            }
+            for &v in &row[..w] {
+                checksum = (checksum ^ v as u64).wrapping_mul(0x0000_0100_0000_01b3);
+                let _ = f.write_str(RAMP[(v as usize * (RAMP.len() - 1)) / 255]);
+            }
+            let _ = f.write_str("\"");
+        }
+        if ok {
+            let _ = write!(f, r#"],"checksum":"0x{checksum:x}"}}"#);
+            if f.overflowed() {
+                overflow = true;
+            } else {
+                f.emit();
+            }
+        }
+    });
+    if !ok {
+        crate::syscall::EFAULT
+    } else if overflow {
+        crate::syscall::EINVAL
+    } else {
+        0
+    }
+}
+
 // ---- Events -------------------------------------------------------------
 
 fn caps_json(f: &mut FrameBuf, caps: u32) {
@@ -902,14 +1006,15 @@ pub fn write_process_table(f: &mut FrameBuf) -> core::fmt::Result {
 /// discovers instead of being handed a SPEC.md that drifts. Static: it is the
 /// kernel describing its own ABI.
 pub fn write_spec(f: &mut FrameBuf) -> core::fmt::Result {
-    use crate::syscall::{SYS_EXIT, SYS_SNAPSHOT, SYS_SPAWN, SYS_WRITE, SYS_YIELD};
+    use crate::syscall::{SYS_BLIT, SYS_EXIT, SYS_SNAPSHOT, SYS_SPAWN, SYS_WRITE, SYS_YIELD};
     f.write_str(r#"{"proto":0,"arch":"riscv64","syscalls":["#)?;
-    let syscalls: [(u64, &str); 5] = [
+    let syscalls: [(u64, &str); 6] = [
         (SYS_EXIT, "exit"),
         (SYS_WRITE, "write"),
         (SYS_YIELD, "yield"),
         (SYS_SPAWN, "spawn"),
         (SYS_SNAPSHOT, "snapshot"),
+        (SYS_BLIT, "blit"),
     ];
     for (i, (num, name)) in syscalls.iter().enumerate() {
         if i > 0 {

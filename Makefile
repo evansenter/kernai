@@ -7,7 +7,7 @@
 TARGET     := riscv64gc-unknown-none-elf
 KERNEL_ELF := kernel/target/$(TARGET)/release/kernai
 
-.PHONY: build payloads run debug gdb demo eval test fmt clippy unsafe-budget clean
+.PHONY: build payloads run debug gdb demo eval raycast test fmt clippy unsafe-budget clean
 
 # Payloads build first: the kernel embeds their ELFs via include_bytes!
 # (kernel/build.rs fails loudly if they're missing).
@@ -36,6 +36,15 @@ demo: build
 # gap; this target shows it.
 eval: build
 	python3 -m harness.eval
+
+# Optional demo: a C-language fixed-point raycaster (Wolfenstein-lite, Doom's
+# ancestor) running as a sandboxed kernai payload, rendered as ASCII frames.
+# Needs clang + lld (rv64). Builds the C payload, then the kernel with the
+# cpayloads feature, then plays it.
+raycast: payloads
+	payloads/build_c.sh
+	cd kernel && cargo build --release --features cpayloads
+	python3 -m harness.raycast
 
 test: unsafe-budget fmt clippy build
 	python3 -m harness.runner all

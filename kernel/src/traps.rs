@@ -48,6 +48,7 @@ const SSTATUS_SPIE: u64 = 1 << 5; // previous interrupt-enable
 const X_SP: usize = 1; // x2
 const X_A0: usize = 9; // x10
 const X_A1: usize = 10; // x11
+const X_A2: usize = 11; // x12
 const X_A7: usize = 16; // x17
 
 /// Saved by hal's trap vector; layout is matched by its asm (offsets
@@ -71,6 +72,9 @@ impl TrapFrame {
     }
     pub fn a1(&self) -> u64 {
         self.regs[X_A1]
+    }
+    pub fn a2(&self) -> u64 {
+        self.regs[X_A2]
     }
     pub fn a7(&self) -> u64 {
         self.regs[X_A7]

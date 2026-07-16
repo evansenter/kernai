@@ -85,6 +85,11 @@ pub fn idle() -> ! {
                 payload::seed_suite_eval();
                 payload::run();
             }
+            #[cfg(feature = "cpayloads")]
+            Some(b'c') => {
+                payload::seed_suite_craycast();
+                payload::run();
+            }
             _ => hal::wait_for_interrupt(), // park until the next tick
         }
     }

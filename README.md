@@ -56,6 +56,8 @@ make test    # full acceptance suite: framing (M0), boot (M1), traps/timer/fault
              # E1 surface eval + E3 cold-handoff (M12), input hardening,
              # determinism, demo — plus unsafe budget; CI runs this
 make eval    # print the E1 scorecard: diagnostic facts recoverable per surface
+make raycast # (needs clang+lld) a C raycaster payload — proto-Doom — rendered
+             # as deterministic ASCII frames; proof kernai runs C workloads
 make debug   # boot QEMU halted with a gdb stub on :1234
 make gdb     # attach gdb-multiarch to a running `make debug`
 ```

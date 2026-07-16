@@ -36,4 +36,19 @@ fn main() {
         println!("cargo:rustc-env=PAYLOAD_{}={path}", name.to_uppercase());
         println!("cargo:rerun-if-changed={path}");
     }
+
+    // The C payloads (cpayloads feature) are built by payloads/build_c.sh into
+    // the same dir; only require them when the feature asked for them.
+    if std::env::var("CARGO_FEATURE_CPAYLOADS").is_ok() {
+        let path = format!("{payload_dir}/craycast");
+        if !Path::new(&path).exists() {
+            panic!(
+                "C payload ELF missing: {path}\n\
+                 the cpayloads feature needs the C payloads built first — \
+                 run `make raycast` (or payloads/build_c.sh)"
+            );
+        }
+        println!("cargo:rustc-env=PAYLOAD_CRAYCAST={path}");
+        println!("cargo:rerun-if-changed={path}");
+    }
 }

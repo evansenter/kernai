@@ -522,3 +522,26 @@ CI. E3 (cold handoff) ships as `runner.py::e3` (a fresh reader reconstructs stat
 from spec/processes/digest alone); E6 was M7. E2/E4/E5/E7/E8 and the full
 agent-loop E1 are future work — logged rather than blocking the ladder's close.
 The MCP surface is published as `docs/SPEC.md` v0.1 (the RFC's durable artifact).
+
+**2026-07-16 · Post-ladder · kernai runs C payloads (the craycast raycaster), behind a `cpayloads` feature so the core stays pure-Rust.**
+To answer "can it run Doom?", the substrate a doomgeneric port needs was built
+and proven with a fixed-point raycaster (Wolfenstein-lite, Doom's ancestor)
+written in freestanding C: clang cross-compiles it (`-march=rv64imac -mabi=lp64`
+— integer-only, because the kernel never sets `sstatus.FS`, so any FP
+instruction would trap, which is exactly why real Doom is fixed-point), lld
+links it with the shared payload `link.ld`, and the kernel's existing ELF loader
+maps it (3 W^X-clean segments, a framebuffer + stack in zeroed `.bss`) with no
+loader change. A new `SYS_BLIT(ptr,w,h)` reads the payload's framebuffer
+**through its page table** (a bad pointer is EFAULT, the same confused-deputy
+defense as `write`), maps bytes → an ASCII ramp, and emits a `frame` event with
+an FNV checksum — the "display as an event/resource" seam (P4/P11), bounded to
+one FrameBuf and capped (72×24) so it can never silently overflow. Two boots
+produce byte-identical frame checksums: a non-Rust workload replays exactly
+(P9). The whole C path is gated by the `cpayloads` cargo feature (default off):
+`make test` and CI stay pure-Rust with no C toolchain; `make raycast` opts in
+(needs clang + lld). `SYS_BLIT`/`on_blit`/the `frame` event are always compiled
+(pure Rust, a permanent kernel capability); only the C payload itself — which
+needs clang — is feature-gated. This proves every hard part of a real
+doomgeneric port (C toolchain, freestanding libc subset, fixed-point math, a
+large framebuffer, a safe blit, deterministic replay); the remaining work is
+volume (the libc shim + WAD + the doomgeneric hooks), not a new unknown.

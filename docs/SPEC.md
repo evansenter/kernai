@@ -53,6 +53,7 @@ consumes one) but never repeat or decrease.
 | `payload_load_fault` | `pid`, `name`, `reason` | a payload's ELF failed to load / map (e.g. out of memory) |
 | `payload_yield` | `pid` | a `Cap::Yield`-holding payload yielded |
 | `fault` | see §2.1 | the P6 diagnostic frame |
+| `frame` | `pid`, `untrusted:true`, `w`, `h`, `rows[]`, `checksum` | a payload framebuffer (via `blit`), rendered as an ASCII grid + an FNV checksum — the display-as-event seam (deterministic under -icount) |
 | `suite_done` | `exited`, `faulted`, `killed` | a suite drained |
 | `panic` | `location`, `msg` | a kernel panic (a bug); reported structured, then shutdown |
 | `rpc` | `rpc:{…}` | a control-plane response envelope (§3) |
@@ -155,6 +156,19 @@ agent-in-the-loop E1 (localization rate/tokens with a real model) is future work
 A single non-`0xAA` byte is an operator command, the zero-dependency escape
 hatch the structured plane grew out of: `r` ring · `x` crash · `p`/`m`/`i`/`f`/`d`/`e`
 the suites. A leading `0xAA` instead begins a request frame (§3).
+
+## 7. Payloads may be C (not just Rust)
+
+A payload is any statically-linked rv64 ELF the loader can map (§ELF loader) —
+the runtime is language-agnostic. `payloads/craycast` is a fixed-point raycaster
+in freestanding C, clang-cross-compiled integer-only (`-march=rv64imac
+-mabi=lp64`: the kernel leaves `sstatus.FS=0`, so no FP instruction may be
+emitted — the same reason Doom is fixed-point) and linked with the shared
+`link.ld`. It renders to a framebuffer in `.bss` and emits it with
+`blit(ptr,w,h)` (syscall 5): the kernel reads the framebuffer through the
+payload's page table (EFAULT on a bad pointer, like `write`), producing the
+`frame` event (§2). Enabled by the `cpayloads` cargo feature; `make raycast`
+builds and plays it.
 
 ## Versioning
 
