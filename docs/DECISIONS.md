@@ -545,3 +545,56 @@ needs clang — is feature-gated. This proves every hard part of a real
 doomgeneric port (C toolchain, freestanding libc subset, fixed-point math, a
 large framebuffer, a safe blit, deterministic replay); the remaining work is
 volume (the libc shim + WAD + the doomgeneric hooks), not a new unknown.
+
+**2026-07-19 · Post-ladder · kernai runs full DOOM (doomgeneric + Freedoom), behind a `doom` feature; the port needed no new kernel isolation surface, only one read-only window primitive and one framebuffer-out syscall.**
+The craycast entry predicted the remaining work was "volume, not a new unknown."
+Confirmed: full id-Software DOOM (via doomgeneric, ~80 C translation units) now
+runs as a sandboxed U-mode payload. What it took, and what it did *not*:
+
+- **Real libc, not a shim.** doomgeneric wants malloc/stdio/string/qsort and
+  soft-float. Rather than stub them, we link **picolibc** (`riscv64-unknown-elf-gcc
+  --specs=picolibc.specs`, `-march=rv64imac -mabi=lp64 -mcmodel=medany`) and wire
+  only its bottom edge (`payloads/doom/sys_kernai.c`): `write`→SYS_WRITE,
+  `sbrk` over a 24 MiB `.bss` arena, and a POSIX file layer that serves the IWAD.
+  Integer-only still holds (soft-float), so the FPU-off invariant is intact.
+- **A custom linker script** (`payloads/doom/doom.ld`), because picolibc's default
+  script links at a tiny fixed region that overflowed on the 24 MiB heap and put
+  code where HI20 relocations truncated. Ours lays down exactly two page-aligned
+  W^X segments (text R+X, data R+W incl. heap + an explicit 1 MiB stack section so
+  it falls inside the mapped data segment) at a low VA — which the kernel's
+  *existing* ELF loader maps unchanged. A `. = ALIGN(0x1000)` between segments got
+  packed away by ld; the section-address form (`.data : ALIGN(0x1000)`) is what
+  actually forces text and data onto disjoint pages (the loader rejects a page
+  mapped twice, so a shared boundary page would fail the load).
+- **The IWAD as a mapped device, not a file.** freedoom1.wad (~28.8 MiB) is too big
+  to embed and there is no filesystem (hard non-goal). QEMU loads it into guest RAM
+  at a physical address deliberately *above* POOL_END (`-m 256M -device
+  loader,file=…,addr=0x88000000`), so the frame allocator never touches it; the
+  kernel maps that window **read-only into the DOOM payload's address space** at a
+  fixed VA (`image_window` / `map_window` in payload.rs), and the libc `open`/`read`
+  shim serves the WAD straight from it. Mapping existing physical memory (not pool
+  frames) costs only the page-table nodes; `frames::free` already ignores the
+  out-of-pool leaves, so `AddressSpace::destroy` reaps the payload cleanly with no
+  allocator change. This is the one new isolation-surface primitive the port added,
+  and it is a *narrowing* one (read-only, U-mode, a single fixed window).
+- **A virtual clock, for determinism.** doomgeneric's `TryRunTics` spins on
+  `I_Sleep(1)` waiting for wall time to advance, then renders. With no wall clock we
+  make Doom's own execution the clock: `DG_SleepMs` and `DG_DrawFrame` each advance
+  a virtual ms counter (`doomgeneric_kernai.c`), so the tic-wait escapes after ~one
+  35 Hz tic and the game advances ~one tic per rendered frame. The clock is a pure
+  function of instruction flow, which `-icount` pins, so two boots are byte-identical
+  (P9) — a full game engine replays exactly, same as the 14 tiny payloads.
+- **Display stays an event/resource (P4/P11).** Each frame is downscaled in the
+  payload to a 72×24 grayscale grid and blitted via the existing `SYS_BLIT` (ASCII
+  ramp + FNV checksum — the deterministic in-band surface). A `doom`-feature-only
+  `SYS_FRAME` streams the true 320×200 colour screen out in base64 `fbchunk` events
+  the host reassembles into PNGs — a richer "display as a resource" seam, reading the
+  payload framebuffer **through its page table** (bad pointer → EFAULT), the same
+  confused-deputy defense as write/blit.
+
+Net: DOOM boots, reads the IWAD, shows the Freedoom title, and plays its attract-mode
+demo (real first-person 3-D gameplay, HUD, enemies) — all in U-mode, memory-isolated,
+FPU-off, deterministic. The whole path is gated by the `doom` cargo feature (default
+off): `make test` and CI stay pure-Rust with no C toolchain or IWAD; `make doom` opts
+in. `SYS_FRAME`/`on_frame_rgb` and the WAD window are compiled only under the feature,
+so the default kernel's ABI surface is unchanged (exit/write/yield/spawn/snapshot/blit).

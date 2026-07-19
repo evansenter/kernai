@@ -90,6 +90,11 @@ pub fn idle() -> ! {
                 payload::seed_suite_craycast();
                 payload::run();
             }
+            #[cfg(feature = "doom")]
+            Some(b'D') => {
+                payload::seed_suite_doom();
+                payload::run();
+            }
             _ => hal::wait_for_interrupt(), // park until the next tick
         }
     }

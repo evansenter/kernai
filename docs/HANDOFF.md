@@ -3,11 +3,28 @@
 Rewritten at the end of every session. Assume the reader has zero context
 beyond this repo (we dogfood E3 on ourselves).
 
-## Current state (2026-07-14, session 2)
+## Current state (2026-07-19, session 3)
 
-**M0–M12 complete and green — the RFC ladder is finished.** `make test` from a
-fresh clone runs seventeen checks in ~11 seconds (fmt + clippy + build + unsafe
-budget first):
+**M0–M12 complete and green, and — beyond the ladder — full DOOM runs as a
+sandboxed payload.** `make test` from a fresh clone runs seventeen checks in
+~11 seconds (fmt + clippy + build + unsafe budget first) and stays **pure Rust**:
+the DOOM/C work is entirely behind off-by-default cargo features, so nothing
+below changed and CI needs no C toolchain.
+
+**DOOM (the `doom` feature, `make doom`).** Full doomgeneric DOOM (~80 C units,
+picolibc, Freedoom IWAD) boots in U-mode, reads the IWAD from a kernel-mapped
+window, shows the Freedoom title, and plays its attract-mode demo — real
+first-person 3-D gameplay, HUD, enemies — rendered both as live ASCII frames and
+as reassembled colour PNG screenshots (`harness/doom_frames/`). Memory-isolated,
+FPU-off (fixed-point), and deterministic: two boots are byte-identical over 220
+frame checksums (P9), demo motion and all. It cost two feature-gated primitives
+(`image_window`/`map_window` for the read-only IWAD window; `SYS_FRAME` for the
+colour framebuffer-out) and **no change to the default kernel ABI or any
+acceptance check**. See DECISIONS.md (2026-07-19) and ARCHITECTURE.md for the
+design; the port files live in `payloads/doom/` (`sys_kernai.c`,
+`doomgeneric_kernai.c`, `doom.ld`, `build_doom.sh`) and `harness/doom.py`.
+
+The seventeen acceptance checks (unchanged):
 
 1. `m0` — framing round-trips over a real pipe (loopback stub)
 2. `m1` — boot to hello frame over the SBI console (RFC acceptance 1)
@@ -79,7 +96,10 @@ fault report can never be silent (the one failure P6 forbids).
 
 Toolchain: nightly-2026-07-14 (rust-toolchain.toml), QEMU 8.2.2
 (`qemu-system-misc`), gdb-multiarch 15.1. `make build` builds the payload
-workspace first (the kernel embeds their ELFs), then the kernel.
+workspace first (the kernel embeds their ELFs), then the kernel. The optional
+`doom` feature additionally needs `riscv64-unknown-elf-gcc` + picolibc
+(`--specs=…/picolibc.specs`) and a Doom IWAD (`apt-get install freedoom`, or set
+`DOOM_WAD`); `cpayloads` needs clang + lld. Neither is required for `make test`.
 
 **Note on session portability:** the remote container was reclaimed and
 re-cloned mid-session and landed on a *stale* local checkout (M4) while origin
@@ -90,7 +110,10 @@ the local working tree is not durable.
 ## What the operator can do
 
 Single command bytes: `r` ring · `x` crash · `p`/`m`/`i`/`f`/`d`/`e` the
-M3–M6/M10 suites + the M12 eval stimulus. Or drive it structured: a `0xAA`-led
+M3–M6/M10 suites + the M12 eval stimulus. With `--features cpayloads`, `c` runs
+the C raycaster; with `--features doom`, `D` runs full DOOM (needs `-m 256M` +
+the IWAD loaded as a device — `make doom` / `harness/doom.py` wires this). Or
+drive it structured: a `0xAA`-led
 length-prefixed frame
 carrying JSON-RPC (MCP) — `initialize`, `tools/list`, `tools/call {run_suite|
 crash|ring_read|set_surface|set_autonomy}`, `resources/list`, `resources/read
@@ -117,11 +140,19 @@ client and `runner.py::m8`…`m11` for full sessions.
 
 ## Exact next step
 
-**The M0–M12 ladder is complete and green.** All twelve milestones and their
-acceptance checks are in `make test`; the twelve principles P1–P12 each have a
-concrete, tested mechanism; the MCP surface is published (`docs/SPEC.md`).
+**The M0–M12 ladder is complete and green, and full DOOM runs on it.** All
+twelve milestones and their acceptance checks are in `make test`; the twelve
+principles P1–P12 each have a concrete, tested mechanism; the MCP surface is
+published (`docs/SPEC.md`); and DOOM (the `doom` feature) is a working
+demonstration that the isolation model holds for a large real-world C workload.
 
 Expansion directions, in the RFC's spirit (pick by value; none is blocking):
+
+0. **DOOM polish (optional).** Input is stubbed (`DG_GetKey` returns nothing, so
+   only attract-mode demos play); wiring operator keystrokes → `DG_GetKey` via a
+   syscall would make it interactively playable. Sound is dropped. `SYS_FRAME`
+   colour dump is keyframe-throttled (`COLOR_EVERY`) to bound event volume. None
+   of these affects the core result; they are cosmetic.
 
 1. **Grow the E1 stimulus set toward N≥20** (RFC E1). Add seeded faults with
    distinct diagnosis needs (unmapped-address load, misaligned access, a stack

@@ -20,7 +20,8 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 KERNEL_ELF = REPO_ROOT / "kernel/target/riscv64gc-unknown-none-elf/release/kernai"
 
 
-def qemu_args(kernel_elf=KERNEL_ELF, gdb=False, record=None, replay=None):
+def qemu_args(kernel_elf=KERNEL_ELF, gdb=False, record=None, replay=None,
+              mem="128M", extra=None):
     # -icount is the base determinism flag (P9). For deterministic replay of
     # operator INPUT (E6/M7), QEMU's record/replay logs every non-deterministic
     # input (serial bytes, timer reads) to `rrfile` in record mode and re-feeds
@@ -37,7 +38,7 @@ def qemu_args(kernel_elf=KERNEL_ELF, gdb=False, record=None, replay=None):
         "qemu-system-riscv64",
         "-machine", "virt",
         "-cpu", "rv64",
-        "-m", "128M",
+        "-m", mem,
         "-bios", "default",              # QEMU's bundled OpenSBI, never vendored
         "-display", "none",
         "-monitor", "none",
@@ -47,6 +48,8 @@ def qemu_args(kernel_elf=KERNEL_ELF, gdb=False, record=None, replay=None):
         "-no-reboot",
         "-kernel", str(kernel_elf),
     ]
+    if extra:                            # e.g. the DOOM harness's -device loader
+        args += extra
     if gdb:
         args += ["-s", "-S"]             # gdb stub on :1234, start halted
     return args
@@ -55,10 +58,11 @@ def qemu_args(kernel_elf=KERNEL_ELF, gdb=False, record=None, replay=None):
 class QemuKernel:
     """Boot the kernel for an acceptance check: read events, send bytes."""
 
-    def __init__(self, kernel_elf=KERNEL_ELF, record=None, replay=None):
+    def __init__(self, kernel_elf=KERNEL_ELF, record=None, replay=None,
+                 mem="128M", extra=None):
         self._stderr = tempfile.TemporaryFile()
         self._proc = subprocess.Popen(
-            qemu_args(kernel_elf, record=record, replay=replay),
+            qemu_args(kernel_elf, record=record, replay=replay, mem=mem, extra=extra),
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=self._stderr,

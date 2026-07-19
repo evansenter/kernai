@@ -14,6 +14,12 @@ edition = "2024"
 # the C payload prebuilt (payloads/build_c.sh, run by the Makefile).
 [features]
 cpayloads = []
+# Embed full doomgeneric DOOM (a picolibc C payload) and its 'D' command +
+# suite. Off by default so the standard build + `make test` stay pure Rust.
+# Enabling it needs riscv64-unknown-elf-gcc + picolibc and the payload prebuilt
+# (payloads/build_doom.sh, run by `make doom`); the IWAD is supplied at run time
+# by the harness, never embedded.
+doom = []
 
 [profile.release]
 panic = "abort"

@@ -51,4 +51,19 @@ fn main() {
         println!("cargo:rustc-env=PAYLOAD_CRAYCAST={path}");
         println!("cargo:rerun-if-changed={path}");
     }
+
+    // The DOOM payload (doom feature), built by payloads/build_doom.sh into the
+    // same dir; only required when the feature asks for it.
+    if std::env::var("CARGO_FEATURE_DOOM").is_ok() {
+        let path = format!("{payload_dir}/doom");
+        if !Path::new(&path).exists() {
+            panic!(
+                "DOOM payload ELF missing: {path}\n\
+                 the doom feature needs the DOOM payload built first — \
+                 run `make doom` (or payloads/build_doom.sh)"
+            );
+        }
+        println!("cargo:rustc-env=PAYLOAD_DOOM={path}");
+        println!("cargo:rerun-if-changed={path}");
+    }
 }

@@ -142,3 +142,34 @@ next. Queue drains → `suite_done` → `idle`.
   replay. The MCP surface is published as `docs/SPEC.md` v0.1 — the RFC's
   durable artifact. Remaining evals (full agent-loop E1, E2/E4/E5/E7/E8) are
   future work; the M0–M12 ladder is complete.
+
+## Beyond the ladder: C payloads and DOOM (optional features)
+
+The kernel runs arbitrary freestanding C, not just Rust — proven by two
+opt-in payloads that touch no core code path. Both are cargo features, **off by
+default**, so `make test` and CI stay pure-Rust with no C toolchain.
+
+- **`cpayloads`** (`make raycast`): a fixed-point raycaster in freestanding C
+  (clang, `-march=rv64imac -mabi=lp64`), linked with the shared `link.ld`, run
+  through the unmodified ELF loader. It renders via `SYS_BLIT`.
+- **`doom`** (`make doom`): full **doomgeneric DOOM** (~80 C units) linked
+  against **picolibc**, playing the **Freedoom** IWAD. It boots, shows the title,
+  and plays its attract-mode demo (first-person 3-D, HUD, enemies) as a sandboxed
+  U-mode payload — FPU-off (fixed-point), memory-isolated, deterministic under
+  `-icount` (two boots byte-identical, P9). See DECISIONS.md (2026-07-19) for the
+  full rationale. The port added exactly two feature-gated primitives and no
+  change to the default ABI:
+  - **`image_window` / `map_window`** — a payload image may declare one
+    read-only physical window mapped into its address space on top of its ELF.
+    DOOM uses it for the IWAD: QEMU loads freedoom1.wad into guest RAM *above*
+    POOL_END (`-m 256M -device loader,…,addr=0x88000000`) so the frame allocator
+    never touches it, and the kernel maps that window R+U at a fixed VA where the
+    payload's picolibc file shim reads it. A *narrowing* primitive (read-only,
+    U-mode, one fixed window); `frames::free` already ignores the out-of-pool
+    leaves, so `destroy` reaps the payload with no allocator change.
+  - **`SYS_FRAME`** (`doom` build only) — streams the true 320×200 colour screen
+    out in base64 `fbchunk` events the host reassembles into PNGs, reading the
+    payload framebuffer *through its page table* (bad pointer → EFAULT), the same
+    confused-deputy defense as `write`/`blit`. `SYS_BLIT`'s ASCII+checksum frame
+    remains the deterministic in-band surface; `SYS_FRAME` is the richer
+    "display as a resource" seam.

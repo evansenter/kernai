@@ -2,5 +2,8 @@ target/
 __pycache__/
 *.pyc
 
+# `make doom` output: reassembled colour screenshots (regenerated each run).
+harness/doom_frames/
+
 # editor/tool temp files
 *.tmp.*

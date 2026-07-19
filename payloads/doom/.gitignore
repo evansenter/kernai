@@ -1,0 +1,4 @@
+# Third-party doomgeneric is cloned at a pinned SHA by build_doom.sh, not vendored.
+/vendor/
+# C object files + linked ELF from build_doom.sh.
+/build/

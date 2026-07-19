@@ -106,6 +106,30 @@ static BADJUMP: &[u8] = include_bytes!(env!("PAYLOAD_BADJUMP"));
 static CRAYCAST: &[u8] = include_bytes!(env!("PAYLOAD_CRAYCAST"));
 #[cfg(not(feature = "cpayloads"))]
 static CRAYCAST: &[u8] = &[];
+// doom is a C payload (the `doom` cargo feature): full doomgeneric DOOM built
+// with picolibc. Like craycast its bytes are empty on the default build and its
+// suite is compiled out, so a plain `make test` stays pure Rust with no DOOM
+// toolchain. Unlike every other image it needs an extra read-only window mapped
+// into its address space — the IWAD (see WAD_* and image_window).
+#[cfg(feature = "doom")]
+static DOOM: &[u8] = include_bytes!(env!("PAYLOAD_DOOM"));
+#[cfg(not(feature = "doom"))]
+static DOOM: &[u8] = &[];
+
+// ---- DOOM IWAD window (the `doom` feature) ------------------------------
+// QEMU loads freedoom1.wad at this physical address — deliberately above
+// POOL_END, so the frame allocator never hands it out (see harness/doom.py's
+// `-m 256M -device loader,...`). The kernel maps it read-only into the DOOM
+// payload's address space at a fixed VA, where the payload's libc file shim
+// reads it as the IWAD. Mapping existing physical memory (not pool frames)
+// costs only the page-table nodes to reach it; `frames::free` ignores the
+// out-of-pool leaves when the space is destroyed.
+#[cfg(feature = "doom")]
+const WAD_VA: usize = 0x5000_0000;
+#[cfg(feature = "doom")]
+const WAD_PA: usize = 0x8800_0000; // == POOL_END; the WAD lives just past the pool
+#[cfg(feature = "doom")]
+const WAD_WINDOW: usize = 32 << 20; // 32 MiB (freedoom1 is ~28.8 MiB)
 
 static IMAGES: &[Image] = &[
     Image {
@@ -215,6 +239,15 @@ static IMAGES: &[Image] = &[
         caps: CAP_WRITE,
         deadline: 0,
     },
+    // doom: full doomgeneric DOOM (the `doom` feature). Empty ELF on the default
+    // build; only seed_suite_doom loads it, and that is compiled out unless the
+    // feature is on. No deadline — a full run renders hundreds of frames.
+    Image {
+        name: "doom",
+        elf: DOOM,
+        caps: CAP_WRITE,
+        deadline: 0,
+    },
 ];
 
 const IMG_HELLO: usize = 0;
@@ -233,6 +266,37 @@ const IMG_WORKER: usize = 12;
 const IMG_BADJUMP: usize = 13;
 #[cfg(feature = "cpayloads")]
 const IMG_CRAYCAST: usize = 14;
+#[cfg(feature = "doom")]
+const IMG_DOOM: usize = 15;
+
+/// A read-only physical window an image needs mapped into its address space on
+/// top of its ELF — memory the kernel exposes that the payload does not
+/// allocate. Only DOOM uses one: the IWAD QEMU loads above the frame pool.
+/// Returns (va, pa, len).
+#[cfg(feature = "doom")]
+fn image_window(image: usize) -> Option<(usize, usize, usize)> {
+    (image == IMG_DOOM).then_some((WAD_VA, WAD_PA, WAD_WINDOW))
+}
+#[cfg(not(feature = "doom"))]
+fn image_window(_image: usize) -> Option<(usize, usize, usize)> {
+    None
+}
+
+/// Map the read-only user window `[pa, pa+len)` at `va` in `space`, page by
+/// page. The window's physical pages lie outside the frame pool, so this maps
+/// existing memory (allocating only the page-table nodes to reach it); a bad
+/// perms/VA is a structured Err the caller turns into a load fault, never a
+/// panic.
+fn map_window(space: &AddressSpace, va: usize, pa: usize, len: usize) -> Result<(), &'static str> {
+    let mut off = 0;
+    while off < len {
+        space
+            .map_page(va + off, pa + off, mm::R | mm::U)
+            .map_err(|_| "window_map_failed")?;
+        off += mm::PAGE_SIZE;
+    }
+    Ok(())
+}
 
 /// Map a payload-supplied spawn selector (stable ABI, see payloads/sys) to an
 /// image index. Only images a payload is allowed to spawn appear here.
@@ -444,6 +508,18 @@ pub fn seed_suite_craycast() {
     enqueue(IMG_CRAYCAST, IMAGES[IMG_CRAYCAST].caps, NO_PID);
 }
 
+/// doom suite (operator 'D', `doom` feature): full doomgeneric DOOM. The kernel
+/// maps the IWAD read-only into the payload's address space (image_window); the
+/// payload's libc file shim reads the WAD from that window, and its platform
+/// layer downscales each rendered frame and blits it via SYS_BLIT — the same
+/// framebuffer-as-event surface craycast uses. With no input, DOOM plays its
+/// built-in attract-mode demos; under -icount the whole run replays exactly (P9).
+#[cfg(feature = "doom")]
+pub fn seed_suite_doom() {
+    clear_table();
+    enqueue(IMG_DOOM, IMAGES[IMG_DOOM].caps, NO_PID);
+}
+
 fn enqueue(image: usize, caps: u32, parent: usize) -> Option<usize> {
     for (pid, slot) in TABLE.iter().enumerate() {
         if slot.state.load(RE) == EMPTY {
@@ -554,6 +630,16 @@ fn start(pid: usize) -> ! {
             load_failed(pid, img.name, e.as_str());
         }
     };
+
+    // Some images need an extra read-only window on top of their ELF (DOOM's
+    // IWAD). Mapped after the ELF so a collision with a segment surfaces as a
+    // load fault, not a silent overwrite.
+    if let Some((va, pa, len)) = image_window(image)
+        && let Err(reason) = map_window(&space, va, pa, len)
+    {
+        space.destroy();
+        load_failed(pid, img.name, reason);
+    }
 
     // Fresh-start register frame: zeroed GPRs (no kernel value leaks across
     // the privilege boundary), sepc = entry, U-mode. Resume through the same
@@ -925,6 +1011,81 @@ pub fn on_blit(ptr: usize, w: usize, h: usize) -> isize {
         crate::syscall::EINVAL
     } else {
         0
+    }
+}
+
+// ---- frame dump (SYS_FRAME): full-color keyframes as base64 chunks --------
+
+/// `frame_rgb(ptr, len, seq)`: stream one chunk of the payload's raw RGB
+/// framebuffer out as an `fbchunk` event. Where `blit` emits a tiny ASCII
+/// thumbnail as the deterministic in-band surface, this ships the true pixels
+/// (DOOM's full 320×200 color screen, in `len`-byte pieces the host stitches
+/// back together and saves as a PNG) — a richer "display as a resource" seam.
+/// Reads the bytes **through the payload's page table** (a bad pointer is
+/// EFAULT, never a kernel read — same confused-deputy defense as write/blit),
+/// base64-encodes them (`+`/`/`/`=` need no JSON escaping) and tags the event
+/// untrusted (P7). Requires `Cap::Write`. `doom` feature only.
+#[cfg(feature = "doom")]
+pub fn on_frame_rgb(ptr: usize, len: usize, seq: usize) -> isize {
+    if !current_has(Cap::Write) {
+        emit_denied("frame", "write");
+        return crate::syscall::ENOCAP;
+    }
+    // 3-aligned so base64 never pads mid-stream; 1440 B → 1920 base64 chars,
+    // which with the header fits one 2 KiB FrameBuf.
+    const FB_CHUNK: usize = 1440;
+    if len == 0 || len > FB_CHUNK {
+        return crate::syscall::EINVAL;
+    }
+    let space = match current_space() {
+        Some(s) => s,
+        None => return crate::syscall::EINVAL,
+    };
+    let mut buf = [0u8; FB_CHUNK];
+    if !space.copy_from_user(ptr, &mut buf[..len]) {
+        return crate::syscall::EFAULT;
+    }
+    let pid = current_pid().unwrap_or(NO_PID);
+    let mut overflow = false;
+    hal::without_interrupts(|| {
+        let mut f = FrameBuf::new();
+        let _ = write!(
+            f,
+            r#"{{"id":{},"type":"fbchunk","pid":{pid},"untrusted":true,"seq":{seq},"n":{len},"data":""#,
+            events::next_id()
+        );
+        write_base64(&mut f, &buf[..len]);
+        let _ = f.write_str(r#""}"#);
+        if f.overflowed() {
+            overflow = true;
+        } else {
+            f.emit();
+        }
+    });
+    if overflow { crate::syscall::EINVAL } else { 0 }
+}
+
+/// Standard-alphabet base64 into a FrameBuf. The alphabet is JSON-string-safe,
+/// so the output drops straight into an event with no escaping.
+#[cfg(feature = "doom")]
+fn write_base64(f: &mut FrameBuf, bytes: &[u8]) {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let g = |i: u32| ALPHABET[(i & 63) as usize];
+    let (chunks, rem) = bytes.as_chunks::<3>();
+    for c in chunks {
+        let n = (c[0] as u32) << 16 | (c[1] as u32) << 8 | c[2] as u32;
+        let s = [g(n >> 18), g(n >> 12), g(n >> 6), g(n)];
+        let _ = f.write_str(core::str::from_utf8(&s).unwrap_or("?"));
+    }
+    if !rem.is_empty() {
+        let b1 = if rem.len() > 1 { rem[1] as u32 } else { 0 };
+        let n = (rem[0] as u32) << 16 | b1 << 8;
+        let s = if rem.len() == 1 {
+            [g(n >> 18), g(n >> 12), b'=', b'=']
+        } else {
+            [g(n >> 18), g(n >> 12), g(n >> 6), b'=']
+        };
+        let _ = f.write_str(core::str::from_utf8(&s).unwrap_or("?"));
     }
 }
 

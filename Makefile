@@ -7,7 +7,7 @@
 TARGET     := riscv64gc-unknown-none-elf
 KERNEL_ELF := kernel/target/$(TARGET)/release/kernai
 
-.PHONY: build payloads run debug gdb demo eval raycast test fmt clippy unsafe-budget clean
+.PHONY: build payloads run debug gdb demo eval raycast doom test fmt clippy unsafe-budget clean
 
 # Payloads build first: the kernel embeds their ELFs via include_bytes!
 # (kernel/build.rs fails loudly if they're missing).
@@ -45,6 +45,16 @@ raycast: payloads
 	payloads/build_c.sh
 	cd kernel && cargo build --release --features cpayloads
 	python3 -m harness.raycast
+
+# Optional demo: full DOOM (doomgeneric) as a sandboxed kernai payload. Needs
+# riscv64-unknown-elf-gcc + picolibc and a Doom IWAD (`apt-get install freedoom`,
+# or set DOOM_WAD). Builds the C payload, then the kernel with the doom feature,
+# then boots it — printing DOOM's stdout, ASCII frames, and saving color PNG
+# screenshots to harness/doom_frames/. Add --verify to check determinism.
+doom: payloads
+	payloads/build_doom.sh
+	cd kernel && cargo build --release --features doom
+	python3 -m harness.doom
 
 test: unsafe-budget fmt clippy build
 	python3 -m harness.runner all
