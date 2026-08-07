@@ -8,9 +8,12 @@ This closes the RFC's agentic loop end-to-end on a real workload:
            color keyframes (SYS_FRAME), reassembled into PNG screenshots
   decide:  a small frame-indexed policy: leave the title, walk the menu
            (New Game → episode → skill), then move and shoot in E1M1
-  act:     key symbols over serial → the kernel's key ring → SYS_GETKEY →
-           DG_GetKey (one byte per event: low 7 bits symbol, bit 7 release)
-  end:     the operator kill byte (0x03) — a live, structured remediation
+  act:     key events over serial → the kernel's key ring → SYS_GETKEY →
+           DG_GetKey. Wire format: each event is the two-byte escape sequence
+           0xA5 <key> (low 7 bits symbol, bit 7 release) — the prefix keeps
+           the shared serial line unambiguous (a bare byte mid-run is
+           discarded by the kernel, never misread as a key or a kill)
+  end:     the operator kill (0xA5 0x03) — a live, structured remediation
            (`payload_killed reason:"operator"`, the E2 seed) — and then a
            post-mortem `resources/read processes` showing the killed payload.
 
@@ -31,15 +34,16 @@ from .mcp import Mcp
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-OP_KILL = 0x03  # ETX: the operator kill byte (never queued as a key)
+KEY_PREFIX = 0xA5  # every key event is the pair 0xA5 <key>
+OP_KILL = 0x03     # 0xA5 0x03 = operator kill (never queued as a key)
 
 
 def press(q, sym):
-    q.send(bytes([ord(sym) & 0x7F]))
+    q.send(bytes([KEY_PREFIX, ord(sym) & 0x7F]))
 
 
 def release(q, sym):
-    q.send(bytes([(ord(sym) & 0x7F) | 0x80]))
+    q.send(bytes([KEY_PREFIX, (ord(sym) & 0x7F) | 0x80]))
 
 
 def tap(q, sym):
@@ -82,6 +86,7 @@ def main():
     frames = 0
     pngs = []
     color = {}
+    checksums = []  # per-frame blit checksums: the input-efficacy evidence
     script = sorted(SCRIPT)
     done = []
     killed = False
@@ -126,6 +131,7 @@ def main():
             elif t == "frame":
                 save_color()
                 frames += 1
+                checksums.append(e["checksum"])
                 # The agent acts on what it has observed.
                 while script and script[0][0] <= frames:
                     _, action, arg = script.pop(0)
@@ -137,8 +143,8 @@ def main():
                     elif action == "release":
                         release(q, arg)
                     elif action == "kill":
-                        print(f"    ✂ frame {frames}: operator kill (0x03)")
-                        q.send(bytes([OP_KILL]))
+                        print(f"    ✂ frame {frames}: operator kill (0xA5 0x03)")
+                        q.send(bytes([KEY_PREFIX, OP_KILL]))
                     if action != "kill":
                         print(f"    ⌨ frame {frames}: {action} {arg!r}")
             elif t == "payload_killed":
@@ -156,7 +162,27 @@ def main():
 
     print(f"\n  Agent session: {frames} frames observed, "
           f"{len(done)} actions sent, {len(pngs)} screenshots → {out_dir}")
-    ok = killed and frames >= 285 and len(pngs) > 5
+
+    # Input efficacy: without input, DOOM's title screen is STATIC for ~170
+    # frames (identical blit checksums until the attract demo starts). The
+    # agent's ESC lands around frame 10-12, so the screen must diverge from
+    # the title baseline long before frame 100 — this fails if SYS_GETKEY, the
+    # key ring, or the symbol mapping silently regress (a kill-only run would
+    # otherwise still "pass").
+    input_worked = False
+    diverged_at = None
+    if len(checksums) >= 100:
+        baseline = checksums[8]  # title screen, pre-ESC
+        for i, c in enumerate(checksums[9:100], start=10):
+            if c != baseline:
+                diverged_at = i
+                input_worked = True
+                break
+    print(f"  Input efficacy: screen diverged from the title at frame "
+          f"{diverged_at} (attract-only runs hold static until ~170) → "
+          f"{'OK' if input_worked else 'NO EFFECT — input path broken?'}")
+
+    ok = killed and frames >= 285 and len(pngs) > 5 and input_worked
     print("  " + ("PASS — the agent started DOOM over MCP, played it via "
                   "getkey, and killed it mid-run." if ok else
                   "INCOMPLETE — see events above."))

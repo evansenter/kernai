@@ -176,15 +176,19 @@ default**, so `make test` and CI stay pure-Rust with no C toolchain.
     remains the deterministic in-band surface; `SYS_FRAME` is the richer
     "display as a resource" seam.
   - **`SYS_GETKEY` + the key ring** (`doom` build only) — the input half of the
-    agentic loop. While a payload runs, the timer tick drains serial bytes into
-    a small ring the payload pops via `getkey` (one byte per key event: low
-    7 bits = symbol, bit 7 = release; the payload owns the symbol→key mapping).
-    Byte `0x03` is never queued: it is the **operator kill** — the payload is
-    marked KILLED with a structured `payload_killed reason:"operator"` event
-    (P1/P2, the E2 seed). The drain only runs while a payload is RUNNING, so
-    idle/MCP serial is untouched. No capability gates `getkey`: input is a
-    grant by construction (the operator chose to feed this payload), unlike
-    output, which stays cap-gated.
+    agentic loop. While an *input-wanting* payload runs (`image_wants_input`,
+    i.e. DOOM only), the timer tick drains serial into a small ring the payload
+    pops via `getkey`. Every key event is the two-byte escape sequence
+    `0xA5 <key>` (low 7 bits = symbol, bit 7 = release; the payload owns the
+    symbol→key mapping), and `0xA5 0x03` is the **operator kill** — the payload
+    is marked KILLED with a structured `payload_killed reason:"operator"` event
+    (P1/P2, the E2 seed). The escape prefix keeps the shared serial line
+    unambiguous (audit-hardened): bare bytes mid-run are discarded — never
+    misread as keys or kills, never leaked to the untrusted payload — and a
+    pair straddling payload termination is swallowed by the idle loop via
+    shared pending state instead of executing as a command. No capability
+    gates `getkey`: input is a grant by construction (the operator chose to
+    feed this payload), unlike output, which stays cap-gated.
   - **Agent-plane parity (P4/P5)** — `run_suite` accepts `doom`/`craycast` on
     feature builds, and the `spec` resource self-describes the doom ABI
     (syscalls `frame`/`getkey`, the IWAD window). `make doom-play`

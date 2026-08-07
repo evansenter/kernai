@@ -83,11 +83,18 @@ def write_png(path, w, h, rgb, scale=1):
     pathlib.Path(path).write_bytes(png)
 
 
-def boot(wad):
-    """A QemuKernel wired for DOOM: 256 MiB RAM + the IWAD loaded as a device."""
+def boot(wad, record=None, replay=None):
+    """A QemuKernel wired for DOOM: 256 MiB RAM + the IWAD loaded as a device.
+
+    `record`/`replay` pass through to QEMU record/replay (M7): interactive
+    (keyed) sessions are host-timed, so THIS — not a re-boot — is how they are
+    reproduced bit-for-bit; rr logs each serial byte at the instruction count
+    it was consumed and re-injects it there."""
     return QemuKernel(
         mem="256M",
         extra=["-device", f"loader,file={wad},addr=0x{WAD_ADDR:x}"],
+        record=record,
+        replay=replay,
     )
 
 

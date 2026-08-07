@@ -639,3 +639,59 @@ logged as future work: preemptive scheduling (mid-run MCP service — today the
 control plane is deaf while a payload runs, so interactive input rides the raw
 serial channel the kernel mediates), and event-budget governance for the
 `fbchunk` keyframe stream (P3 currently governs trap frames only).
+
+**2026-07-19 · Post-ladder · Input-seam audit: the key protocol gains an escape prefix, input becomes per-image opt-in, and kill/causal edge cases are closed.**
+The three-reviewer adversarial audit of the agentic-DOOM diff (lenses: kernel
+correctness/races, isolation invariants, ABI/protocol consistency) cleared the
+mm alias branch, W^X, the window perms, the keyring arithmetic, the kill/deadline
+interleaving, and snapshot frame accounting — and confirmed real defects, all on
+the *shared-serial input seam*, fixed as follows:
+
+- **[MED×2, both reviewers] Bare serial bytes mid-run were ambiguous.** Any byte
+  arriving while a payload ran was drained as input: a pipelined MCP frame was
+  destroyed (and its bytes leaked to the untrusted payload via `getkey`), and a
+  binary length byte `0x03` forged an operator kill. Fix: key protocol v2 —
+  every key event is the two-byte escape `0xA5 <key>`, the kill is `0xA5 0x03`,
+  and bare (unprefixed) bytes mid-run are **discarded**: never a key, never a
+  kill, never payload-visible. Residual, documented: the control plane is deaf
+  while a payload runs (it always was — single-threaded), so a doom-build client
+  must not pipeline MCP requests behind `run_suite`; the real fix is preemptive
+  scheduling (the E2 work).
+- **[MED] Key symbols aliased idle commands across termination.** A key byte in
+  flight when the payload died was executed by `idle()` as a command ('f' → M6
+  suite, 'x' → deliberate kernel crash). Fix: the prefix again, plus shared
+  `KEY_PENDING` state — a pair straddling termination is swallowed by the idle
+  loop (`swallow_stray_key`), never interpreted; `clear_keys` also resets it.
+- **[MED] The kill was untargeted across payloads.** A stale `0x03` buffered
+  when one payload died could kill the *next* payload of a multi-payload suite
+  at its first tick. Fix: draining is now opt-in per image (`image_wants_input`,
+  DOOM only) — no other suite's payloads ever consume serial, so a kill pair
+  can only land on the payload the operator was actually driving, and every
+  non-input suite on a doom build keeps the pre-input buffered-serial semantics.
+- **[LOW] Double Ctrl-C emitted two terminal events.** The kill now dedupes on
+  state: only a RUNNING payload is marked+emitted, so one pid gets exactly one
+  terminal event.
+- **[LOW] A kill outracing `emit_start` forged a causal edge.** `start_event`
+  is now reset on enqueue/restore (0 = unset; id 0 is always the boot hello),
+  and `payload_killed` emits `caused_by:null` when unset — the P12 DAG can
+  carry an honest "killed before start" node but never a stale edge to a prior
+  slot occupant.
+- **[LOW] Keys behind a kill lingered in the ring** until the next suite seed;
+  they are now discarded at drain time (the payload is dead; nothing may
+  inherit its input).
+- **[MED] `doom_play`'s PASS was insensitive to the input path it claims to
+  prove** — a kill-only run (SYS_GETKEY broken, menu never opened) still
+  passed. It now asserts *input efficacy*: without input the title screen is
+  static (identical blit checksums) until the attract demo at ~frame 170, so
+  the screen must diverge from the pre-ESC baseline before frame 100 — which
+  fails if the syscall, the ring, or the symbol mapping silently regress.
+- **[LOW] The "keyed sessions replay via record/replay" claim was unwired** —
+  `boot()` never passed `record=` through. Plumbed (`boot(wad, record=,
+  replay=)`). The rr *mechanism* is proven by M7 on the base machine; a full
+  rr round-trip of a keyed DOOM session is far slower than a live run (rr
+  disables `sleep=off`, so wall time ≥ virtual time) and is left running as a
+  long soak rather than a gate — PROVISIONAL until that soak lands.
+
+The wire change is payload-invisible (the kernel strips the prefix before the
+ring; `DG_GetKey` is unchanged) and default-build-invisible (all of it is cfg'd
+out; `make test` green before and after). `harness/doom_play.py` speaks v2.

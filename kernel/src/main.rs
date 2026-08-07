@@ -57,7 +57,14 @@ pub fn kmain(_hartid: usize, _dtb: usize) -> ! {
 ///          Single bytes remain the compat/fallback control plane.
 pub fn idle() -> ! {
     loop {
-        match hal::console_getchar() {
+        let byte = hal::console_getchar();
+        // Doom builds: a key-protocol pair (0xA5-prefixed) that straddled
+        // payload termination must be swallowed here, not executed as a
+        // command — the audit's termination-race fix. No-op for all other
+        // bytes; compiled out entirely on the default build.
+        #[cfg(feature = "doom")]
+        let byte = byte.filter(|&b| !payload::swallow_stray_key(b));
+        match byte {
             Some(0xAA) => rpc::read_request(),
             Some(b'r') => traps::emit_ring_dump(),
             Some(b'x') => hal::trigger_illegal_instruction(),

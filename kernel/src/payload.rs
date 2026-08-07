@@ -533,6 +533,11 @@ fn enqueue(image: usize, caps: u32, parent: usize) -> Option<usize> {
             slot.started_at.store(0, RE);
             slot.root.store(0, RE);
             slot.resume_frame.store(0, RE);
+            // Reset the causal anchor: a reused slot must never let an early
+            // terminal event (e.g. an operator kill outracing emit_start) name
+            // a PREVIOUS occupant's start as its cause. 0 = unset (the id 0
+            // event is always the boot hello, never a payload_start).
+            slot.start_event.store(0, RE);
             slot.state.store(PENDING, RE);
             return Some(pid);
         }
@@ -807,6 +812,7 @@ fn enqueue_restore(sid: usize) -> Option<usize> {
             slot.started_at.store(0, RE);
             slot.root.store(new_as.root(), RE);
             slot.resume_frame.store(new_frame, RE);
+            slot.start_event.store(0, RE); // see enqueue: no stale causal anchor
             slot.state.store(PENDING, RE);
             return Some(pid);
         }
@@ -1092,13 +1098,25 @@ fn write_base64(f: &mut FrameBuf, bytes: &[u8]) {
 }
 
 // ---- operator input (SYS_GETKEY, `doom` feature): keys as a queue ---------
-// The agentic input seam: while a payload runs, serial bytes are drained (by
-// the timer tick) into a small ring the payload pops via SYS_GETKEY — the
-// operator/agent acts on the workload *through the kernel*, one byte per key
-// event (low 7 bits = symbol, bit 7 = release; the payload owns the symbol →
-// key mapping). Byte 0x03 is never queued: it is the operator kill (P1/P2 —
-// a live remediation, the E2 seed). Interactive input is host-timed, so a
-// keyed run is replayed via QEMU record/replay (M7) rather than by rebooting.
+// The agentic input seam: while an input-wanting payload runs, serial bytes
+// are drained (by the timer tick) into a small ring the payload pops via
+// SYS_GETKEY — the operator/agent acts on the workload *through the kernel*.
+//
+// Wire protocol (v2, post-audit): every key event is the TWO-byte sequence
+// `0xA5 <key>` — low 7 bits of <key> = symbol, bit 7 = release; the payload
+// owns the symbol → key mapping. `0xA5 0x03` is the operator kill (P1/P2 — a
+// live remediation, the E2 seed), never queued as input. The escape prefix is
+// what keeps the shared serial line unambiguous (the audit's three MED
+// findings): a bare byte mid-run — e.g. a length byte of an MCP frame sent
+// while the plane is deaf — is DISCARDED, never interpreted as a key or a
+// kill and never leaked to the untrusted payload; and a half-delivered pair
+// straddling payload termination is finished (swallowed) by the idle loop via
+// the shared KEY_PENDING state instead of being executed as an idle command.
+// Only images that opt in (`image_wants_input`, i.e. DOOM) drain at all, so
+// every other suite on a doom build keeps the pre-input serial semantics, and
+// a stale kill can never carry over onto the next payload of a multi-payload
+// suite. Interactive input is host-timed, so a keyed run is replayed via QEMU
+// record/replay (M7) rather than by rebooting.
 
 #[cfg(feature = "doom")]
 const KEY_RING_SIZE: usize = 64;
@@ -1108,34 +1126,64 @@ static KEY_RING: [AtomicU8; KEY_RING_SIZE] = [const { AtomicU8::new(0) }; KEY_RI
 static KEY_HEAD: AtomicUsize = AtomicUsize::new(0); // next slot to pop
 #[cfg(feature = "doom")]
 static KEY_TAIL: AtomicUsize = AtomicUsize::new(0); // next slot to push
-/// The operator kill byte (ETX / Ctrl-C): kill the running payload, never
-/// queued as input.
+/// Key-event escape prefix: a key event (or kill) is `0xA5 <byte>`.
+#[cfg(feature = "doom")]
+const KEY_PREFIX: u8 = 0xA5;
+/// A prefix has been consumed but its partner byte has not arrived yet. Shared
+/// between the tick drain and the idle loop so a pair straddling payload
+/// termination is still consumed as a pair, never executed as a command.
+#[cfg(feature = "doom")]
+static KEY_PENDING: AtomicBool = AtomicBool::new(false);
+/// The operator kill partner byte (ETX / Ctrl-C): `0xA5 0x03` kills the
+/// running payload; never queued as input.
 #[cfg(feature = "doom")]
 const KEY_OP_KILL: u8 = 0x03;
 
+/// Only images that opt into operator input have their run drain serial into
+/// the key ring; every other payload leaves serial untouched (buffered for
+/// idle/MCP exactly as before input existed).
+#[cfg(feature = "doom")]
+fn image_wants_input(image: usize) -> bool {
+    image == IMG_DOOM
+}
+
 /// Drain pending serial bytes into the key ring. Called from the timer tick
-/// (trap context, interrupts hardware-off) — but only while a payload is
-/// running, so the idle command loop / MCP reader never lose bytes to it.
-/// Returns true if the operator killed the current payload (0x03), in which
-/// case it is already marked KILLED and the caller must redirect to the
-/// scheduler.
+/// (trap context, interrupts hardware-off) — but only while an input-wanting
+/// payload is RUNNING, so the idle command loop / MCP reader never lose bytes
+/// to it. Returns true if the operator killed the current payload
+/// (`0xA5 0x03`), in which case it is already marked KILLED and the caller
+/// must redirect to the scheduler.
 #[cfg(feature = "doom")]
 pub fn drain_keys() -> bool {
     let pid = match current_pid() {
         Some(p) => p,
         None => return false,
     };
-    if TABLE[pid].state.load(RE) != RUNNING {
+    if TABLE[pid].state.load(RE) != RUNNING || !image_wants_input(TABLE[pid].image.load(RE)) {
         return false;
     }
     let mut killed = false;
     while let Some(b) = hal::console_getchar() {
-        if b == KEY_OP_KILL {
-            TABLE[pid].state.store(KILLED, RE);
-            emit_killed_operator(pid);
-            killed = true;
-            // Keep draining: flush any queued bytes behind the kill.
+        if !KEY_PENDING.load(RE) {
+            if b == KEY_PREFIX {
+                KEY_PENDING.store(true, RE);
+            }
+            // else: a bare byte on a deaf plane (e.g. a pipelined MCP frame).
+            // Discarded — never a key, never a kill, never payload-visible.
             continue;
+        }
+        KEY_PENDING.store(false, RE);
+        if b == KEY_OP_KILL {
+            // Dedupe: a double Ctrl-C must not emit two terminal events.
+            if TABLE[pid].state.load(RE) == RUNNING {
+                TABLE[pid].state.store(KILLED, RE);
+                emit_killed_operator(pid);
+            }
+            killed = true;
+            continue;
+        }
+        if killed {
+            continue; // discard keys behind the kill — the payload is dead
         }
         let tail = KEY_TAIL.load(RE);
         if tail.wrapping_sub(KEY_HEAD.load(RE)) >= KEY_RING_SIZE {
@@ -1145,6 +1193,24 @@ pub fn drain_keys() -> bool {
         KEY_TAIL.store(tail.wrapping_add(1), RE);
     }
     killed
+}
+
+/// Idle-loop filter: swallow stray key-protocol bytes so they are never
+/// executed as idle commands (the audit's termination-race finding). Returns
+/// true if `b` was consumed: either the partner of a prefix the tick drain
+/// (or a previous idle read) already consumed, or a fresh prefix whose
+/// partner will be consumed next. The payload is gone, so the pair is simply
+/// discarded.
+#[cfg(feature = "doom")]
+pub fn swallow_stray_key(b: u8) -> bool {
+    if KEY_PENDING.swap(false, RE) {
+        return true; // the partner of a half-delivered pair
+    }
+    if b == KEY_PREFIX {
+        KEY_PENDING.store(true, RE);
+        return true;
+    }
+    false
 }
 
 /// `getkey()`: pop one key byte for the running payload; EAGAIN when the ring
@@ -1163,25 +1229,36 @@ pub fn on_getkey() -> isize {
 }
 
 /// Empty the key ring (on suite seed, so stale input never leaks into a new
-/// payload's queue).
+/// payload's queue) and forget any half-delivered pair.
 #[cfg(feature = "doom")]
 fn clear_keys() {
     KEY_HEAD.store(0, RE);
     KEY_TAIL.store(0, RE);
+    KEY_PENDING.store(false, RE);
 }
 
 /// The operator killed the payload mid-run (P1: remediation is a structured
-/// event, not a power cycle). Shape mirrors the deadline kill.
+/// event, not a power cycle). Shape mirrors the deadline kill. `caused_by` is
+/// null if the kill outraced `emit_start` (start_event still unset — the slot
+/// is reset on enqueue), so the causal DAG never gets a stale edge.
 #[cfg(feature = "doom")]
 fn emit_killed_operator(pid: usize) {
     hal::without_interrupts(|| {
         let mut f = FrameBuf::new();
         let _ = write!(
             f,
-            r#"{{"id":{},"type":"payload_killed","pid":{pid},"reason":"operator","caused_by":{}}}"#,
+            r#"{{"id":{},"type":"payload_killed","pid":{pid},"reason":"operator","caused_by":"#,
             events::next_id(),
-            TABLE[pid].start_event.load(RE),
         );
+        match TABLE[pid].start_event.load(RE) {
+            0 => {
+                let _ = f.write_str("null");
+            }
+            ev => {
+                let _ = write!(f, "{ev}");
+            }
+        }
+        let _ = f.write_str("}");
         f.emit();
     });
 }
