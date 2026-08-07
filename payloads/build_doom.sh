@@ -38,13 +38,16 @@ STRIP="${RISCV_STRIP:-riscv64-unknown-elf-strip}"
 SPECS="${PICOLIBC_SPECS:-/usr/lib/picolibc/riscv64-unknown-elf/picolibc.specs}"
 
 # ~26 s of game time by default (title screen → attract-mode demo playback).
-# Overridable so a quick boot smoke test can render fewer frames.
+# Overridable so a quick boot smoke test can render fewer frames, or an
+# interactive (agent-driven) session can run longer. COLOR_EVERY is the
+# full-color keyframe cadence (every Nth frame ships as PNG-able RGB).
 FRAMES="${DOOM_FRAMES:-900}"
+COLOR_EVERY="${DOOM_COLOR_EVERY:-24}"
 
 CFLAGS="--specs=$SPECS -march=rv64imac -mabi=lp64 -mcmodel=medany \
   -O2 -ffreestanding -fno-stack-protector \
   -DNORMALUNIX -DLINUX -DDOOMGENERIC_RESX=320 -DDOOMGENERIC_RESY=200 \
-  -DDOOM_FRAMES=$FRAMES \
+  -DDOOM_FRAMES=$FRAMES -DDOOM_COLOR_EVERY=$COLOR_EVERY \
   -Wno-implicit-function-declaration -Wno-int-conversion \
   -I$SRCDIR"
 
@@ -81,4 +84,4 @@ done
 # then strip to shrink the copy embedded in the kernel image.
 $CC $CFLAGS -T "$DOOMDIR/doom.ld" $objs -o "$BUILD/doom.elf"
 $STRIP --strip-all -o "$OUT/doom" "$BUILD/doom.elf"
-echo "built DOOM payload: $OUT/doom ($(wc -c < "$OUT/doom") bytes, $FRAMES frames)"
+echo "built DOOM payload: $OUT/doom ($(wc -c < "$OUT/doom") bytes, $FRAMES frames, keyframe every $COLOR_EVERY)"

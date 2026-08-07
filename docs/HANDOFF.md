@@ -16,13 +16,25 @@ picolibc, Freedoom IWAD) boots in U-mode, reads the IWAD from a kernel-mapped
 window, shows the Freedoom title, and plays its attract-mode demo — real
 first-person 3-D gameplay, HUD, enemies — rendered both as live ASCII frames and
 as reassembled colour PNG screenshots (`harness/doom_frames/`). Memory-isolated,
-FPU-off (fixed-point), and deterministic: two boots are byte-identical over 220
-frame checksums (P9), demo motion and all. It cost two feature-gated primitives
-(`image_window`/`map_window` for the read-only IWAD window; `SYS_FRAME` for the
-colour framebuffer-out) and **no change to the default kernel ABI or any
-acceptance check**. See DECISIONS.md (2026-07-19) and ARCHITECTURE.md for the
-design; the port files live in `payloads/doom/` (`sys_kernai.c`,
-`doomgeneric_kernai.c`, `doom.ld`, `build_doom.sh`) and `harness/doom.py`.
+FPU-off (fixed-point), and deterministic: two boots are byte-identical over
+hundreds of frame checksums (P9), demo motion and all. See DECISIONS.md
+(2026-07-19, two entries) and ARCHITECTURE.md for the design; the port files
+live in `payloads/doom/` (`sys_kernai.c`, `doomgeneric_kernai.c`, `doom.ld`,
+`build_doom.sh`) and `harness/doom.py`.
+
+**And DOOM is agent-operable (`make doom-play`).** The RFC's agentic loop is
+closed end-to-end on it: an agent starts DOOM **over MCP** (`tools/call
+run_suite {suite:"doom"}`), **observes** it as structured events (`frame` ASCII
++ `fbchunk` colour keyframes via `SYS_FRAME`), **acts** through the kernel
+(key bytes → the tick-drained key ring → `SYS_GETKEY` → `DG_GetKey` — the
+scripted policy in `harness/doom_play.py` opens the menu, starts a new game,
+and plays E1M1: walks, turns, fires), and **remediates** live (byte `0x03` =
+operator kill → `payload_killed reason:"operator"`, the E2 seed), finishing
+with a `resources/read processes` post-mortem that shows the killed payload.
+The doom build's ABI self-describes in the `spec` resource (P5), and
+`deep_copy` aliases the IWAD window so snapshot/fork (P8) composes with
+windowed payloads. All of it is feature-gated: **no change to the default
+kernel ABI or any acceptance check**.
 
 The seventeen acceptance checks (unchanged):
 
@@ -148,11 +160,15 @@ demonstration that the isolation model holds for a large real-world C workload.
 
 Expansion directions, in the RFC's spirit (pick by value; none is blocking):
 
-0. **DOOM polish (optional).** Input is stubbed (`DG_GetKey` returns nothing, so
-   only attract-mode demos play); wiring operator keystrokes → `DG_GetKey` via a
-   syscall would make it interactively playable. Sound is dropped. `SYS_FRAME`
-   colour dump is keyframe-throttled (`COLOR_EVERY`) to bound event volume. None
-   of these affects the core result; they are cosmetic.
+0. **DOOM polish (optional).** Input, kill, MCP-start, and P8-compatibility are
+   DONE (`make doom-play`). Still open, all non-blocking: sound is dropped; the
+   `fbchunk` keyframe stream is throttled by `COLOR_EVERY` but not governed by
+   the P3 budget machinery (the autonomy dial governs trap frames only); the
+   control plane is deaf *while* a payload runs (single-threaded — interactive
+   input rides the kernel-mediated raw serial channel, and full mid-run MCP
+   service is the same preemptive-scheduling work as E2 below); and a
+   DOOM-checkpoint demo (fork a game mid-level into what-if continuations —
+   the mm groundwork is in) would be a strong P8 showcase.
 
 1. **Grow the E1 stimulus set toward N≥20** (RFC E1). Add seeded faults with
    distinct diagnosis needs (unmapped-address load, misaligned access, a stack

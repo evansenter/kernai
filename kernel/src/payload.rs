@@ -413,6 +413,8 @@ fn clear_table() {
     free_snapshots();
     AUTO_FORK.store(0, RE);
     LAST_SNAP.store(0, RE);
+    #[cfg(feature = "doom")]
+    clear_keys();
 }
 
 /// Free all snapshots (their deep-copied address spaces + saved frames).
@@ -1089,6 +1091,101 @@ fn write_base64(f: &mut FrameBuf, bytes: &[u8]) {
     }
 }
 
+// ---- operator input (SYS_GETKEY, `doom` feature): keys as a queue ---------
+// The agentic input seam: while a payload runs, serial bytes are drained (by
+// the timer tick) into a small ring the payload pops via SYS_GETKEY — the
+// operator/agent acts on the workload *through the kernel*, one byte per key
+// event (low 7 bits = symbol, bit 7 = release; the payload owns the symbol →
+// key mapping). Byte 0x03 is never queued: it is the operator kill (P1/P2 —
+// a live remediation, the E2 seed). Interactive input is host-timed, so a
+// keyed run is replayed via QEMU record/replay (M7) rather than by rebooting.
+
+#[cfg(feature = "doom")]
+const KEY_RING_SIZE: usize = 64;
+#[cfg(feature = "doom")]
+static KEY_RING: [AtomicU8; KEY_RING_SIZE] = [const { AtomicU8::new(0) }; KEY_RING_SIZE];
+#[cfg(feature = "doom")]
+static KEY_HEAD: AtomicUsize = AtomicUsize::new(0); // next slot to pop
+#[cfg(feature = "doom")]
+static KEY_TAIL: AtomicUsize = AtomicUsize::new(0); // next slot to push
+/// The operator kill byte (ETX / Ctrl-C): kill the running payload, never
+/// queued as input.
+#[cfg(feature = "doom")]
+const KEY_OP_KILL: u8 = 0x03;
+
+/// Drain pending serial bytes into the key ring. Called from the timer tick
+/// (trap context, interrupts hardware-off) — but only while a payload is
+/// running, so the idle command loop / MCP reader never lose bytes to it.
+/// Returns true if the operator killed the current payload (0x03), in which
+/// case it is already marked KILLED and the caller must redirect to the
+/// scheduler.
+#[cfg(feature = "doom")]
+pub fn drain_keys() -> bool {
+    let pid = match current_pid() {
+        Some(p) => p,
+        None => return false,
+    };
+    if TABLE[pid].state.load(RE) != RUNNING {
+        return false;
+    }
+    let mut killed = false;
+    while let Some(b) = hal::console_getchar() {
+        if b == KEY_OP_KILL {
+            TABLE[pid].state.store(KILLED, RE);
+            emit_killed_operator(pid);
+            killed = true;
+            // Keep draining: flush any queued bytes behind the kill.
+            continue;
+        }
+        let tail = KEY_TAIL.load(RE);
+        if tail.wrapping_sub(KEY_HEAD.load(RE)) >= KEY_RING_SIZE {
+            continue; // ring full: drop newest (a lost key beats a stale queue)
+        }
+        KEY_RING[tail % KEY_RING_SIZE].store(b, RE);
+        KEY_TAIL.store(tail.wrapping_add(1), RE);
+    }
+    killed
+}
+
+/// `getkey()`: pop one key byte for the running payload; EAGAIN when the ring
+/// is empty. No capability required: it reads only the input queue the
+/// operator explicitly fed to this (single, running) payload — input is a
+/// grant by construction, unlike output (write/blit) which exfiltrates.
+#[cfg(feature = "doom")]
+pub fn on_getkey() -> isize {
+    let head = KEY_HEAD.load(RE);
+    if head == KEY_TAIL.load(RE) {
+        return crate::syscall::EAGAIN;
+    }
+    let b = KEY_RING[head % KEY_RING_SIZE].load(RE);
+    KEY_HEAD.store(head.wrapping_add(1), RE);
+    b as isize
+}
+
+/// Empty the key ring (on suite seed, so stale input never leaks into a new
+/// payload's queue).
+#[cfg(feature = "doom")]
+fn clear_keys() {
+    KEY_HEAD.store(0, RE);
+    KEY_TAIL.store(0, RE);
+}
+
+/// The operator killed the payload mid-run (P1: remediation is a structured
+/// event, not a power cycle). Shape mirrors the deadline kill.
+#[cfg(feature = "doom")]
+fn emit_killed_operator(pid: usize) {
+    hal::without_interrupts(|| {
+        let mut f = FrameBuf::new();
+        let _ = write!(
+            f,
+            r#"{{"id":{},"type":"payload_killed","pid":{pid},"reason":"operator","caused_by":{}}}"#,
+            events::next_id(),
+            TABLE[pid].start_event.load(RE),
+        );
+        f.emit();
+    });
+}
+
 // ---- Events -------------------------------------------------------------
 
 fn caps_json(f: &mut FrameBuf, caps: u32) {
@@ -1183,6 +1280,16 @@ pub fn write_spec(f: &mut FrameBuf) -> core::fmt::Result {
         }
         write!(f, r#"{{"num":{num},"name":"{name}"}}"#)?;
     }
+    // The doom build's ABI extensions must self-describe too (P5): an agent
+    // discovers frame/getkey from the spec, not from a doc that drifts.
+    #[cfg(feature = "doom")]
+    {
+        use crate::syscall::{SYS_FRAME, SYS_GETKEY};
+        write!(
+            f,
+            r#",{{"num":{SYS_FRAME},"name":"frame"}},{{"num":{SYS_GETKEY},"name":"getkey"}}"#
+        )?;
+    }
     f.write_str(r#"],"caps":["#)?;
     let caps: [(&str, u32); 3] = [
         ("write", CAP_WRITE),
@@ -1197,10 +1304,18 @@ pub fn write_spec(f: &mut FrameBuf) -> core::fmt::Result {
     }
     write!(
         f,
-        r#"],"memory":{{"kernel_base":"0x80200000","pool_base":"0x{:x}","pool_end":"0x{:x}"}}}}"#,
+        r#"],"memory":{{"kernel_base":"0x80200000","pool_base":"0x{:x}","pool_end":"0x{:x}"}}"#,
         hal::POOL_BASE,
         hal::POOL_END,
-    )
+    )?;
+    // The IWAD window (doom build): the one kernel-provided mapping a payload
+    // gets beyond its ELF — an agent reading the spec learns it exists.
+    #[cfg(feature = "doom")]
+    write!(
+        f,
+        r#","windows":[{{"name":"iwad","image":"doom","va":"0x{WAD_VA:x}","len":{WAD_WINDOW},"perms":"r"}}]"#
+    )?;
+    f.write_str("}")
 }
 
 fn emit_start(pid: usize, name: &str, caps: u32, entry: usize, restored: bool) {

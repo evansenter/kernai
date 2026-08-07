@@ -223,6 +223,22 @@ impl AddressSpace {
                     continue;
                 }
                 let src_frame = pte_pa(pte);
+                // A user leaf whose PA lies outside the frame pool is a
+                // kernel-provided window (e.g. the DOOM IWAD), not memory this
+                // payload owns: alias it — map the same PA with the same perms
+                // — instead of copying. phys_read would refuse it anyway
+                // (bounds-checked to the pool), and windows are mapped
+                // read-only, so continuations can safely share the physical
+                // pages; destroy() already leaves them alone (frames::free
+                // ignores out-of-pool addresses). This is what lets snapshot/
+                // fork (P8) work for windowed payloads.
+                if !(hal::POOL_BASE..hal::POOL_END).contains(&src_frame) {
+                    let perms = pte & (R | W | X | U);
+                    if dst.map_page(va, src_frame, perms).is_err() {
+                        return false;
+                    }
+                    continue;
+                }
                 let new_frame = match frames::alloc() {
                     Some(f) => f,
                     None => return false,

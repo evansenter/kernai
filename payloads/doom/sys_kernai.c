@@ -13,6 +13,7 @@
 #define SYS_WRITE 1
 #define SYS_BLIT 5
 #define SYS_FRAME 6
+#define SYS_GETKEY 7
 
 static long ksys(long nr, long a0, long a1, long a2) {
     register long x0 asm("a0") = a0, x1 asm("a1") = a1, x2 asm("a2") = a2, x7 asm("a7") = nr;
@@ -179,3 +180,6 @@ void kernai_blit(const void* fb, unsigned w, unsigned h) {
 void kernai_frame(const void* buf, unsigned len, unsigned seq) {
     ksys(SYS_FRAME, (long)buf, len, seq);
 }
+// Pop one operator key byte (low 7 bits = symbol, bit 7 = release), or a
+// negative errno when the kernel's key ring is empty.
+int kernai_getkey(void) { return (int)ksys(SYS_GETKEY, 0, 0, 0); }

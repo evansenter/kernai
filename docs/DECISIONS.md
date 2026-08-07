@@ -598,3 +598,44 @@ FPU-off, deterministic. The whole path is gated by the `doom` cargo feature (def
 off): `make test` and CI stay pure-Rust with no C toolchain or IWAD; `make doom` opts
 in. `SYS_FRAME`/`on_frame_rgb` and the WAD window are compiled only under the feature,
 so the default kernel's ABI surface is unchanged (exit/write/yield/spawn/snapshot/blit).
+
+**2026-07-19 · Post-ladder · The agentic loop closed over DOOM: input as a kernel-mediated queue, operator kill mid-run, MCP-first-class feature suites, and window-aware checkpointing.**
+Running DOOM proved the substrate; this change makes it *agent-operable*, per the
+original RFC principles, with four additions:
+
+- **Input (SYS_GETKEY + the key ring).** While a payload runs, the timer tick
+  drains serial bytes into a 64-slot ring; the payload pops them via
+  `SYS_GETKEY`. One byte per key event: low 7 bits = a symbol, bit 7 = release;
+  the payload owns the symbol→key mapping (kernel stays policy-free). The drain
+  is gated on "a payload is RUNNING", so the idle command loop and the MCP
+  reader never lose bytes to it. `getkey` requires no capability — deliberately:
+  it reads only the input queue the operator explicitly fed to this payload;
+  input is a grant by construction, unlike output (write/blit/frame) which
+  exfiltrates and stays cap-gated. Interactive input is host-timed, so a keyed
+  session replays via QEMU record/replay (M7) — the no-input paths (all
+  acceptance checks, `make doom --verify`) remain boot-for-boot deterministic.
+- **Operator kill (0x03).** The one byte the drain never queues: it marks the
+  running payload KILLED, emits `payload_killed reason:"operator"`, and redirects
+  to the scheduler — remediation of a live workload as a structured event (P1/P2),
+  the seed of E2's MTTR story. Same shape as the deadline kill.
+- **Feature suites are MCP-first-class (P4/P5).** `run_suite` accepts
+  `doom`/`craycast` on feature builds — an agent starts DOOM over JSON-RPC like
+  any suite — and the `spec` resource self-describes the doom build's ABI
+  (syscalls `frame`/`getkey`, the IWAD window with VA/len/perms). The default
+  build's spec is byte-identical to before.
+- **deep_copy aliases windows (P8 correctness).** Snapshotting a payload with a
+  kernel-provided window used to fail: `phys_read` (pool-bounded, correctly)
+  refused the out-of-pool IWAD pages. `copy_user_pages` now maps out-of-pool
+  user leaves by alias — same PA, same perms — instead of copying. Windows are
+  read-only, so continuations share them safely, and `destroy` already ignores
+  them. Checkpoint/fork now composes with windowed payloads.
+
+`harness/doom_play.py` (`make doom-play`) closes the loop end-to-end: start DOOM
+via `tools/call run_suite`, observe `frame`/`fbchunk` events, walk the menu and
+play E1M1 via key symbols, kill it mid-run with 0x03, then read `processes` for
+the structured post-mortem. The policy is scripted (reproducible without a model
+in the loop), but the seam is exactly the one an LLM operator uses. Not done, and
+logged as future work: preemptive scheduling (mid-run MCP service — today the
+control plane is deaf while a payload runs, so interactive input rides the raw
+serial channel the kernel mediates), and event-budget governance for the
+`fbchunk` keyframe stream (P3 currently governs trap frames only).

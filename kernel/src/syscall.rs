@@ -21,6 +21,11 @@ pub const SYS_BLIT: u64 = 5;
 /// the default surface stays exit/write/yield/spawn/snapshot/blit.
 #[cfg(feature = "doom")]
 pub const SYS_FRAME: u64 = 6;
+/// Pop one operator-input key byte (queued by the timer tick's serial drain);
+/// EAGAIN when empty. The other half of the agentic loop: frames out via
+/// blit/frame, keys in via getkey. `doom` feature build only.
+#[cfg(feature = "doom")]
+pub const SYS_GETKEY: u64 = 7;
 
 // errno-style returns (negative). Kept few and structured.
 pub const ENOSYS: isize = -1;
@@ -53,6 +58,8 @@ pub fn dispatch(frame: &mut TrapFrame) -> Outcome {
         SYS_BLIT => Outcome::Resume(payload::on_blit(a0, a1, frame.a2() as usize)),
         #[cfg(feature = "doom")]
         SYS_FRAME => Outcome::Resume(payload::on_frame_rgb(a0, a1, frame.a2() as usize)),
+        #[cfg(feature = "doom")]
+        SYS_GETKEY => Outcome::Resume(payload::on_getkey()),
         _ => Outcome::Resume(ENOSYS),
     }
 }

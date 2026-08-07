@@ -157,7 +157,7 @@ default**, so `make test` and CI stay pure-Rust with no C toolchain.
   and plays its attract-mode demo (first-person 3-D, HUD, enemies) as a sandboxed
   U-mode payload — FPU-off (fixed-point), memory-isolated, deterministic under
   `-icount` (two boots byte-identical, P9). See DECISIONS.md (2026-07-19) for the
-  full rationale. The port added exactly two feature-gated primitives and no
+  full rationale. The port added a handful of feature-gated primitives and no
   change to the default ABI:
   - **`image_window` / `map_window`** — a payload image may declare one
     read-only physical window mapped into its address space on top of its ELF.
@@ -166,10 +166,30 @@ default**, so `make test` and CI stay pure-Rust with no C toolchain.
     never touches it, and the kernel maps that window R+U at a fixed VA where the
     payload's picolibc file shim reads it. A *narrowing* primitive (read-only,
     U-mode, one fixed window); `frames::free` already ignores the out-of-pool
-    leaves, so `destroy` reaps the payload with no allocator change.
+    leaves, so `destroy` reaps the payload with no allocator change. `deep_copy`
+    aliases (never copies) out-of-pool user leaves, so snapshot/fork (P8)
+    composes with windowed payloads.
   - **`SYS_FRAME`** (`doom` build only) — streams the true 320×200 colour screen
     out in base64 `fbchunk` events the host reassembles into PNGs, reading the
     payload framebuffer *through its page table* (bad pointer → EFAULT), the same
     confused-deputy defense as `write`/`blit`. `SYS_BLIT`'s ASCII+checksum frame
     remains the deterministic in-band surface; `SYS_FRAME` is the richer
     "display as a resource" seam.
+  - **`SYS_GETKEY` + the key ring** (`doom` build only) — the input half of the
+    agentic loop. While a payload runs, the timer tick drains serial bytes into
+    a small ring the payload pops via `getkey` (one byte per key event: low
+    7 bits = symbol, bit 7 = release; the payload owns the symbol→key mapping).
+    Byte `0x03` is never queued: it is the **operator kill** — the payload is
+    marked KILLED with a structured `payload_killed reason:"operator"` event
+    (P1/P2, the E2 seed). The drain only runs while a payload is RUNNING, so
+    idle/MCP serial is untouched. No capability gates `getkey`: input is a
+    grant by construction (the operator chose to feed this payload), unlike
+    output, which stays cap-gated.
+  - **Agent-plane parity (P4/P5)** — `run_suite` accepts `doom`/`craycast` on
+    feature builds, and the `spec` resource self-describes the doom ABI
+    (syscalls `frame`/`getkey`, the IWAD window). `make doom-play`
+    (`harness/doom_play.py`) closes the loop end-to-end: start DOOM over MCP,
+    observe `frame`/`fbchunk` events, walk the menu and play E1M1 via key
+    symbols, kill it mid-run, read `processes` for the structured post-mortem.
+    Interactive input is host-timed, so keyed sessions replay via QEMU
+    record/replay (M7); input-free runs stay boot-for-boot byte-identical.

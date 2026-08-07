@@ -24,6 +24,7 @@
 
 void kernai_blit(const void* fb, unsigned w, unsigned h);          // sys_kernai.c
 void kernai_frame(const void* buf, unsigned len, unsigned seq);    // sys_kernai.c
+int kernai_getkey(void);                                           // sys_kernai.c
 
 // Output grid — fits the kernel's blit cap (72x24) and one 2 KiB frame event.
 #define OUTW 72
@@ -33,7 +34,10 @@ static unsigned char s_frame[OUTW * OUTH];
 // Full-color keyframe: every COLOR_EVERY-th frame we also ship the true
 // 320x200 screen (RGB) so the host can save a PNG. 1440 B/chunk matches the
 // kernel's SYS_FRAME limit (3-aligned → no base64 padding mid-stream).
-#define COLOR_EVERY 24
+#ifndef DOOM_COLOR_EVERY
+#define DOOM_COLOR_EVERY 24
+#endif
+#define COLOR_EVERY DOOM_COLOR_EVERY
 #define FB_CHUNK 1440
 static unsigned char rgb_chunk[FB_CHUNK];
 static uint32_t s_frame_no = 0;
@@ -89,10 +93,33 @@ uint32_t DG_GetTicksMs(void) { return s_ms; }
 void DG_SleepMs(uint32_t ms) { s_ms += ms; }
 void DG_SetWindowTitle(const char* t) { (void)t; }
 
+// Operator input (the other half of the agentic loop): the kernel queues key
+// bytes the agent sends over serial; we pop them via SYS_GETKEY. Wire format:
+// low 7 bits = a symbol from the small protocol below, bit 7 = key release.
+// With no input queued, Doom plays its attract-mode demos as before.
+static unsigned char sym_to_doomkey(unsigned char sym) {
+    switch (sym) {
+        case 'u': return KEY_UPARROW;    // forward
+        case 'd': return KEY_DOWNARROW;  // back
+        case 'l': return KEY_LEFTARROW;  // turn left
+        case 'r': return KEY_RIGHTARROW; // turn right
+        case 'n': return KEY_ENTER;
+        case 'e': return KEY_ESCAPE;
+        case 'f': return KEY_FIRE;
+        case 's': return KEY_USE;
+        case 't': return KEY_TAB;
+        default: return sym;  // ASCII passthrough ('y', digits, menu hotkeys)
+    }
+}
+
 int DG_GetKey(int* pressed, unsigned char* key) {
-    (void)pressed;
-    (void)key;
-    return 0;  // no input → attract mode plays the built-in demos
+    int v = kernai_getkey();
+    if (v < 0) {
+        return 0;  // ring empty
+    }
+    *pressed = !(v & 0x80);
+    *key = sym_to_doomkey((unsigned char)(v & 0x7f));
+    return 1;
 }
 
 extern void doomgeneric_Create(int argc, char** argv);

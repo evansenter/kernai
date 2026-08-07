@@ -7,7 +7,7 @@
 TARGET     := riscv64gc-unknown-none-elf
 KERNEL_ELF := kernel/target/$(TARGET)/release/kernai
 
-.PHONY: build payloads run debug gdb demo eval raycast doom test fmt clippy unsafe-budget clean
+.PHONY: build payloads run debug gdb demo eval raycast doom doom-play test fmt clippy unsafe-budget clean
 
 # Payloads build first: the kernel embeds their ELFs via include_bytes!
 # (kernel/build.rs fails loudly if they're missing).
@@ -55,6 +55,14 @@ doom: payloads
 	payloads/build_doom.sh
 	cd kernel && cargo build --release --features doom
 	python3 -m harness.doom
+
+# The agentic loop closed on DOOM: start the suite over MCP, observe frame
+# events, act via key symbols (SYS_GETKEY), end with the operator kill. Builds
+# with a longer frame budget + denser color keyframes for the interactive run.
+doom-play: payloads
+	DOOM_FRAMES=2000 DOOM_COLOR_EVERY=12 payloads/build_doom.sh
+	cd kernel && cargo build --release --features doom
+	python3 -m harness.doom_play
 
 test: unsafe-budget fmt clippy build
 	python3 -m harness.runner all

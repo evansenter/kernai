@@ -246,10 +246,19 @@ pub fn handle(frame: &mut TrapFrame) {
             );
             f.emit();
         }
+        // Agentic input seam (doom builds): while a payload runs, the tick
+        // drains serial bytes into the key ring the payload pops via
+        // SYS_GETKEY — and byte 0x03 is the operator kill, a live remediation
+        // (P1/P2, the E2 seed). Gated on a running payload inside drain_keys,
+        // so the idle command loop / MCP reader never lose bytes to it.
+        #[cfg(feature = "doom")]
+        let op_killed = crate::payload::drain_keys();
+        #[cfg(not(feature = "doom"))]
+        let op_killed = false;
         // M4 seam: a running payload's instruction-count deadline is checked
         // here; an over-budget payload is redirected to the scheduler
         // (crate::payload::on_tick returns whether it killed the current one).
-        if crate::payload::on_tick() {
+        if crate::payload::on_tick() || op_killed {
             redirect_to_scheduler(frame);
         }
         return;

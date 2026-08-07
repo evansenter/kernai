@@ -143,6 +143,13 @@ fn handle_tools_call(json: &str, id: &str) {
                 "f" | "m6" => payload::seed_suite_m6,
                 "d" | "m10" => payload::seed_suite_m10,
                 "e" | "eval" => payload::seed_suite_eval,
+                // Feature-build workloads are first-class on the agent plane
+                // too (P4): an agent starts DOOM the same way it starts any
+                // suite — no fallback to the single-byte channel required.
+                #[cfg(feature = "cpayloads")]
+                "c" | "craycast" => payload::seed_suite_craycast,
+                #[cfg(feature = "doom")]
+                "D" | "doom" => payload::seed_suite_doom,
                 _ => return respond_error(id, -32602, "unknown suite"),
             };
             if let Some(op) = op {
@@ -321,7 +328,7 @@ fn respond_tools_list(id: &str) {
         tool(
             f,
             "run_suite",
-            "Run a payload suite (p|m|i|f|d|e).",
+            "Run a payload suite (p|m|i|f|d|e; feature builds add craycast/doom).",
             Some("suite"),
         )?;
         f.write_str(",")?;
