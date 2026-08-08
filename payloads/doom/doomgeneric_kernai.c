@@ -25,6 +25,13 @@
 void kernai_blit(const void* fb, unsigned w, unsigned h);          // sys_kernai.c
 void kernai_frame(const void* buf, unsigned len, unsigned seq);    // sys_kernai.c
 int kernai_getkey(void);                                           // sys_kernai.c
+long kernai_snapshot(void);                                        // sys_kernai.c
+
+// The checkpoint sentinel symbol (P8 showcase): when the operator sends this
+// key, we snapshot the whole game instead of forwarding a Doom key — the
+// kernel then forks the checkpoint into independent "what-if" continuations
+// that resume from this exact game state and diverge on their own later input.
+#define KEY_SNAP_SENTINEL '#'
 
 // Output grid — fits the kernel's blit cap (72x24) and one 2 KiB frame event.
 #define OUTW 72
@@ -113,13 +120,22 @@ static unsigned char sym_to_doomkey(unsigned char sym) {
 }
 
 int DG_GetKey(int* pressed, unsigned char* key) {
-    int v = kernai_getkey();
-    if (v < 0) {
-        return 0;  // ring empty
+    for (;;) {
+        int v = kernai_getkey();
+        if (v < 0) {
+            return 0;  // ring empty
+        }
+        unsigned char sym = (unsigned char)(v & 0x7f);
+        if (sym == KEY_SNAP_SENTINEL) {
+            if (!(v & 0x80)) {
+                kernai_snapshot();  // checkpoint on press; swallow the sentinel
+            }
+            continue;  // never a Doom key
+        }
+        *pressed = !(v & 0x80);
+        *key = sym_to_doomkey(sym);
+        return 1;
     }
-    *pressed = !(v & 0x80);
-    *key = sym_to_doomkey((unsigned char)(v & 0x7f));
-    return 1;
 }
 
 extern void doomgeneric_Create(int argc, char** argv);

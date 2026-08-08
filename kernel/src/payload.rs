@@ -641,6 +641,21 @@ pub fn seed_suite_doom() {
     enqueue(IMG_DOOM, IMAGES[IMG_DOOM].caps, NO_PID);
 }
 
+/// doom fork suite (`run_suite {suite:"doomfork"}`, `doom` feature): the P8
+/// showcase on a real game. DOOM checkpoints itself when the operator sends the
+/// `#` key (kernai_snapshot in the platform layer); after DOOM leaves the CPU
+/// the kernel forks that checkpoint into two independent "what-if"
+/// continuations, each resuming from the identical game state and free to
+/// diverge on its own later input. This exercises snapshot/fork (P8) composing
+/// with the IWAD window (deep_copy aliases the read-only window rather than
+/// copying it) — the whole reason that alias path exists.
+#[cfg(feature = "doom")]
+pub fn seed_suite_doom_fork() {
+    clear_table();
+    enqueue(IMG_DOOM, IMAGES[IMG_DOOM].caps, NO_PID);
+    AUTO_FORK.store(2, RE); // two what-if continuations after the checkpoint
+}
+
 fn enqueue(image: usize, caps: u32, parent: usize) -> Option<usize> {
     for (pid, slot) in TABLE.iter().enumerate() {
         if slot.state.load(RE) == EMPTY {
@@ -1174,6 +1189,15 @@ pub fn on_frame_rgb(ptr: usize, len: usize, seq: usize) -> isize {
     if !current_has(Cap::Write) {
         emit_denied("frame", "write");
         return crate::syscall::ENOCAP;
+    }
+    // P3 governance: the full-colour keyframe stream is by far the highest-volume
+    // event source. Under the autonomous autonomy dial the kernel declines to
+    // spend the operator's budget on it — the cheap deterministic ASCII `frame`
+    // (via blit) still flows, and the payload sees success (the pixels were
+    // simply not worth forwarding), so a governed run stays byte-deterministic
+    // in its ASCII surface. Reactive (default) ships every chunk.
+    if crate::traps::autonomous() {
+        return 0;
     }
     // 3-aligned so base64 never pads mid-stream; 1440 B → 1920 base64 chars,
     // which with the header fits one 2 KiB FrameBuf.

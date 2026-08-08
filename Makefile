@@ -7,7 +7,7 @@
 TARGET     := riscv64gc-unknown-none-elf
 KERNEL_ELF := kernel/target/$(TARGET)/release/kernai
 
-.PHONY: build payloads run debug gdb demo eval agent-eval conformance raycast doom doom-play test fmt clippy unsafe-budget clean
+.PHONY: build payloads run debug gdb demo eval agent-eval conformance raycast doom doom-play doom-fork test fmt clippy unsafe-budget clean
 
 # Payloads build first: the kernel embeds their ELFs via include_bytes!
 # (kernel/build.rs fails loudly if they're missing).
@@ -78,6 +78,13 @@ doom-play: payloads
 	DOOM_FRAMES=2000 DOOM_COLOR_EVERY=12 payloads/build_doom.sh
 	cd kernel && cargo build --release --features doom
 	python3 -m harness.doom_play
+
+# P8 on a real game: checkpoint DOOM mid-level, fork two what-if continuations
+# that resume from the identical state and diverge on their own later input.
+doom-fork: payloads
+	DOOM_FRAMES=2000 DOOM_COLOR_EVERY=6 payloads/build_doom.sh
+	cd kernel && cargo build --release --features doom
+	python3 -m harness.doom_fork
 
 test: unsafe-budget fmt clippy build
 	python3 -m harness.runner all

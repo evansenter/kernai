@@ -11,6 +11,7 @@
 
 #define SYS_EXIT 0
 #define SYS_WRITE 1
+#define SYS_SNAPSHOT 4
 #define SYS_BLIT 5
 #define SYS_FRAME 6
 #define SYS_GETKEY 7
@@ -183,3 +184,6 @@ void kernai_frame(const void* buf, unsigned len, unsigned seq) {
 // Pop one operator key byte (low 7 bits = symbol, bit 7 = release), or a
 // negative errno when the kernel's key ring is empty.
 int kernai_getkey(void) { return (int)ksys(SYS_GETKEY, 0, 0, 0); }
+// Checkpoint the whole payload (P8). Returns a positive snapshot id in the
+// original; a restored/forked continuation resumes here seeing 0.
+long kernai_snapshot(void) { return ksys(SYS_SNAPSHOT, 0, 0, 0); }

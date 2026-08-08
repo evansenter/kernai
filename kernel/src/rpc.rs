@@ -153,6 +153,8 @@ fn handle_tools_call(json: &str, id: &str) {
                 "c" | "craycast" => payload::seed_suite_craycast,
                 #[cfg(feature = "doom")]
                 "D" | "doom" => payload::seed_suite_doom,
+                #[cfg(feature = "doom")]
+                "doomfork" => payload::seed_suite_doom_fork,
                 _ => return respond_error(id, -32602, "unknown suite"),
             };
             // M13: this may now be reached from the mid-run service window (a
