@@ -853,6 +853,35 @@ def e2_live_mttr():
         assert procs[0]["name"] == "livelock" and procs[0]["state"] == "killed", \
             f"processes: {procs}"
 
+        # Second remediation style — by POLICY, not direct kill (P1's named
+        # "deadline extensions" verb, inverted): re-seed the incident, then
+        # TIGHTEN the livelock's budget below what it has already burned; the
+        # kernel's own autonomous deadline mechanism ends it. The operator
+        # only adjusted policy.
+        m.result("tools/call",
+                 {"name": "run_suite", "arguments": {"suite": "e2"}})
+        seen2 = []
+        while True:
+            e = json.loads(q.stream.next_frame(timeout=30))
+            if e["type"] == "payload_start" and e["name"] == "livelock":
+                break
+        resp = m.result("tools/call",
+                        {"name": "set_budget",
+                         "arguments": {"pid": 0, "deadline": 5000},
+                         "opId": "e2-budget"},
+                        collect=seen2)
+        assert resp["status"] == "budget_set" and resp["deadline"] == 5000, \
+            f"set_budget: {resp}"
+        while True:
+            e = json.loads(q.stream.next_frame(timeout=30))
+            if e["type"] == "payload_killed":
+                assert e["reason"] == "deadline", f"wrong reason: {e}"
+                assert e["elapsed"] > e["deadline"], f"not over budget: {e}"
+                break
+            assert e["type"] in ("tick", "sched"), f"unexpected: {e}"
+        while json.loads(q.stream.next_frame(timeout=30))["type"] != "suite_done":
+            pass
+
 
 @milestone("e3")
 def e3_cold_handoff():

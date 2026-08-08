@@ -1257,6 +1257,21 @@ pub fn kill_pid(pid: usize) -> Result<u64, &'static str> {
     })
 }
 
+/// Operator budget adjustment (the `set_budget` tool). P1 names "deadline
+/// extensions" as an externalized policy decision; with M13 the operator can
+/// also TIGHTEN a live payload's instruction budget and let the autonomous
+/// deadline mechanism end it — remediation by policy, not by direct kill.
+/// `units` are timebase units from the payload's original start (0 = no
+/// deadline). PENDING only, same containment rationale as `kill_pid`.
+pub fn set_deadline(pid: usize, units: u64) -> Result<(), &'static str> {
+    let slot = TABLE.get(pid).ok_or("no such pid")?;
+    if slot.state.load(RE) != PENDING {
+        return Err("payload not alive");
+    }
+    slot.deadline.store(units, RE);
+    Ok(())
+}
+
 /// The scheduler's explanation of a preemption (P11: "the scheduler explains
 /// its last decision"): the payload was suspended because control-plane input
 /// arrived.

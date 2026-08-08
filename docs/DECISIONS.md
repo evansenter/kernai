@@ -755,3 +755,14 @@ keystrokes; non-input payloads on doom builds get the same live plane as the
 default build. The audit's residual ("the plane is deaf while a payload runs")
 is retired for every payload except DOOM itself, where the deafness is now a
 deliberate property of owning the input channel.
+
+**2026-08-08 · M13 · `set_budget`: the second remediation style — policy, not kill.**
+P1's text names deadline extensions as the canonical externalized policy
+decision; `set_budget {pid, deadline}` (opId-idempotent, PENDING-only like
+`kill`) is that verb, servable mid-run via M13 preemption. It cuts both ways:
+extend a budget to spare a payload, or tighten it below what a runaway has
+already burned and let the kernel's own deadline mechanism end it — the
+operator only adjusts policy; the mechanism stays autonomous. The `e2` check
+now exercises both styles against the livelock: scenario 1 `kill` (reason
+"operator"), scenario 2 `set_budget 5000` → `payload_killed reason:"deadline"`
+with `elapsed > deadline`, no direct kill issued.

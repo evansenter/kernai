@@ -215,6 +215,37 @@ fn handle_tools_call(json: &str, id: &str) {
                 Err(reason) => respond_error(id, -32602, reason),
             }
         }
+        Some("set_budget") => {
+            // P1's named policy verb: adjust a live payload's instruction
+            // budget (timebase units from its start; 0 = none). Tightening it
+            // below the elapsed time lets the autonomous deadline mechanism
+            // end a runaway — remediation by policy. Servable mid-run (M13).
+            let args = object_get(params, "arguments").unwrap_or("{}");
+            let pid = match object_get(args, "pid").and_then(parse_u32) {
+                Some(p) => p as usize,
+                None => return respond_error(id, -32602, "missing pid"),
+            };
+            let deadline = match object_get(args, "deadline").and_then(parse_u32) {
+                Some(d) => d as u64,
+                None => return respond_error(id, -32602, "missing deadline"),
+            };
+            if let Some(op) = op {
+                let h = fnv1a(op);
+                if op_seen(h) {
+                    return respond_duplicate(id, op);
+                }
+                op_record(h);
+            }
+            match payload::set_deadline(pid, deadline) {
+                Ok(()) => respond_result(id, move |f| {
+                    write!(
+                        f,
+                        r#"{{"status":"budget_set","pid":{pid},"deadline":{deadline}}}"#
+                    )
+                }),
+                Err(reason) => respond_error(id, -32602, reason),
+            }
+        }
         Some("ring_read") => respond_result(id, traps::write_ring_resource),
         Some("set_surface") => {
             let args = object_get(params, "arguments").unwrap_or("{}");
@@ -380,6 +411,13 @@ fn respond_tools_list(id: &str) {
             f,
             "kill",
             "Kill a live payload by pid — servable mid-run (M13/E2 remediation).",
+            Some("pid"),
+        )?;
+        f.write_str(",")?;
+        tool(
+            f,
+            "set_budget",
+            "Set a live payload's instruction budget (deadline, timebase units; 0=none) — P1 policy, servable mid-run.",
             Some("pid"),
         )?;
         f.write_str(",")?;
