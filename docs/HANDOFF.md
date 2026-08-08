@@ -3,7 +3,7 @@
 Rewritten at the end of every session. Assume the reader has zero context
 beyond this repo (we dogfood E3 on ourselves).
 
-## Current state (2026-07-19, session 3)
+## Current state (2026-08-08, session 4)
 
 **M0–M12 complete and green, and — beyond the ladder — full DOOM runs as a
 sandboxed payload — and, since M13, the control plane is live while payloads
@@ -37,7 +37,7 @@ The doom build's ABI self-describes in the `spec` resource (P5), and
 windowed payloads. All of it is feature-gated: **no change to the default
 kernel ABI or any acceptance check**.
 
-The seventeen acceptance checks (unchanged):
+The eighteen acceptance checks:
 
 1. `m0` — framing round-trips over a real pipe (loopback stub)
 2. `m1` — boot to hello frame over the SBI console (RFC acceptance 1)
