@@ -695,3 +695,17 @@ the *shared-serial input seam*, fixed as follows:
 The wire change is payload-invisible (the kernel strips the prefix before the
 ring; `DG_GetKey` is unchanged) and default-build-invisible (all of it is cfg'd
 out; `make test` green before and after). `harness/doom_play.py` speaks v2.
+
+**2026-08-08 · PROVISIONAL resolved: rr record/replay of a full keyed DOOM session is impractical as a gate — the mechanism stays proven at M7 scale.**
+The soak answered the open question decisively: recording a keyed DOOM session
+wrote **1.4 GB of rr log before reaching even the eighth frame** (rr disables
+`sleep=off` and logs at event granularity; DOOM's instruction volume is ~10⁴×
+the milestone payloads M7 records comfortably). A multi-GB, hour-scale gate is
+worse than no gate. Standing position: `boot(record=/replay=)` stays plumbed and
+correct; M7 proves the record/replay mechanism end-to-end on this exact machine
+config minus `-m 256M`/the loader device; bit-exact reproduction of *keyed* DOOM
+sessions is deferred to future work (a snapshot-anchored short-window recording,
+or kernel-side input logging — the key ring is already the single choke point a
+kernel-native input log would hook). Input-free DOOM runs remain boot-for-boot
+deterministic with no rr needed (re-verified this session: 200 identical
+checksums).
