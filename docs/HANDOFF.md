@@ -187,13 +187,14 @@ Expansion directions, in the RFC's spirit (pick by value; none is blocking):
    surface-content proxy (facts-recoverable). The real experiment drives an LLM
    operator over each surface and measures localization rate/time/tokens; it
    needs model access, so it belongs in `make eval`/a separate harness, not CI.
-3. **E2 mechanism: DONE (M13).** Input-driven preemption + the `kill` tool +
-   the `livelock` pathology + the `e2` acceptance check are in. What remains of
-   E2 proper is the *measurement*: the A/B across surfaces with an LLM operator
-   (same model-access dependency as item 2 — the two share a harness), a richer
-   pathology set (leaking payload, runaway spawn loop — both need only new
-   fixtures, the remediation verb exists), and a `set_budget` tool (adjust a
-   live payload's deadline — small, now that the plane is live mid-run).
+3. **E2 mechanism: DONE (M13).** Input-driven preemption, the `kill` AND
+   `set_budget` tools (both P4 named verbs; the `e2` check remediates the
+   livelock both ways — direct kill, and budget-tightening where the kernel's
+   own deadline mechanism does the ending), and the `livelock` pathology are
+   in. What remains of E2 proper is the *measurement*: the A/B across surfaces
+   with an LLM operator (same model-access dependency as item 2), plus a
+   richer pathology set (runaway spawn loop, snapshot hog — new fixtures only,
+   the verbs exist).
 4. **A degraded reference implementation** (a Linux daemon speaking the same
    `docs/SPEC.md` surface — no true checkpoint/fork, but real) so the eval suite
    becomes a public benchmark for *both* kernel surfaces and operator agents.
