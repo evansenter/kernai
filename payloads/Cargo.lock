@@ -10,6 +10,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "breaker"
+version = "0.1.0"
+dependencies = [
+ "sys",
+]
+
+[[package]]
 name = "child"
 version = "0.1.0"
 dependencies = [
@@ -25,6 +32,13 @@ dependencies = [
 
 [[package]]
 name = "delegator"
+version = "0.1.0"
+dependencies = [
+ "sys",
+]
+
+[[package]]
+name = "execdata"
 version = "0.1.0"
 dependencies = [
  "sys",
@@ -52,7 +66,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "misalign"
+version = "0.1.0"
+dependencies = [
+ "sys",
+]
+
+[[package]]
 name = "muzzled"
+version = "0.1.0"
+dependencies = [
+ "sys",
+]
+
+[[package]]
+name = "nullread"
 version = "0.1.0"
 dependencies = [
  "sys",
@@ -74,6 +102,13 @@ dependencies = [
 
 [[package]]
 name = "spawner"
+version = "0.1.0"
+dependencies = [
+ "sys",
+]
+
+[[package]]
+name = "stackover"
 version = "0.1.0"
 dependencies = [
  "sys",

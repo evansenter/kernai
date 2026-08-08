@@ -24,6 +24,11 @@ fn main() {
         "redelegator",
         "worker",
         "badjump",
+        "breaker",
+        "misalign",
+        "nullread",
+        "execdata",
+        "stackover",
     ] {
         let path = format!("{payload_dir}/{name}");
         if !Path::new(&path).exists() {

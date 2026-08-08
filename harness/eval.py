@@ -25,6 +25,17 @@ from .qemu import QemuKernel
 # Seeded faults (the existing fixtures double as E1's stimulus set) and, per
 # fault, the diagnostic facts an operator needs to localize it. Each fact has a
 # checker for the structured frame and one for the classic printf line.
+def _classic_stval_mod4(ln):
+    """The classic line carries stval=0x…; misalignment is computable from it."""
+    for tok in ln.split():
+        if tok.startswith("stval=0x"):
+            try:
+                return int(tok[6:], 16) % 4 != 0
+            except ValueError:
+                return False
+    return False
+
+
 def _has(d, *path):
     for k in path:
         if not isinstance(d, dict) or k not in d:
@@ -105,6 +116,105 @@ BUGS = {
              lambda ln: False),
         ],
     },
+    "breaker": {  # breakpoint: a bare ebreak instruction
+        "cause_name": "breakpoint",
+        "facts": [
+            ("cause classified",
+             lambda f: f.get("cause_name") == "breakpoint",
+             lambda ln: "breakpoint" in ln),
+            ("faulting PC",
+             lambda f: _has(f, "sepc"),
+             lambda ln: "pc=0x" in ln),
+            ("causal parent (which run)",
+             lambda f: _has(f, "caused_by") and _has(f, "pid"),
+             lambda ln: False),
+            ("full register file",
+             lambda f: len(f.get("regs", {})) == 31,
+             lambda ln: False),
+        ],
+    },
+    "misalign": {  # misaligned AMO: amoadd.w on addr%4 == 2 (QEMU reports the
+        # AMO's read phase, so the cause is load_address_misaligned)
+        "cause_name": "load_address_misaligned",
+        "facts": [
+            ("cause classified",
+             lambda f: f.get("cause_name") == "load_address_misaligned",
+             lambda ln: "load_address_misaligned" in ln),
+            ("faulting address",
+             lambda f: _has(f, "stval"),
+             lambda ln: "stval=0x" in ln),
+            ("misalignment root cause (stval % 4 != 0)",
+             lambda f: _has(f, "stval") and int(f["stval"], 16) % 4 != 0,
+             lambda ln: _classic_stval_mod4(ln)),
+            ("pointer register identified (register file)",
+             lambda f: len(f.get("regs", {})) == 31,
+             lambda ln: False),
+            ("causal parent (which run)",
+             lambda f: _has(f, "caused_by") and _has(f, "pid"),
+             lambda ln: False),
+        ],
+    },
+    "nullread": {  # load page fault at VA 0: the classic null deref
+        "cause_name": "load_page_fault",
+        "facts": [
+            ("cause classified",
+             lambda f: f.get("cause_name") == "load_page_fault",
+             lambda ln: "load_page_fault" in ln),
+            ("null address (stval == 0)",
+             lambda f: f.get("stval") == "0x0",
+             lambda ln: " stval=0x0 " in ln + " "),
+            ("nothing mapped at 0 (root cause: v=0)",
+             lambda f: any(e.get("v") == 0 for e in (f.get("pagewalk") or [])),
+             lambda ln: False),
+            ("causal parent (which run)",
+             lambda f: _has(f, "caused_by") and _has(f, "pid"),
+             lambda ln: False),
+        ],
+    },
+    "execdata": {  # instruction page fault: fetch from a LIVE data page
+        "cause_name": "instruction_page_fault",
+        "facts": [
+            ("cause classified",
+             lambda f: f.get("cause_name") == "instruction_page_fault",
+             lambda ln: "instruction_page_fault" in ln),
+            ("faulting PC (the data address)",
+             lambda f: _has(f, "sepc"),
+             lambda ln: "pc=0x" in ln),
+            ("mapped but not executable (root cause: v=1, x=0 — NOT badjump's v=0)",
+             lambda f: any(e.get("v") == 1 and e.get("x") == 0
+                           for e in (f.get("pagewalk") or []))
+                       and not any(e.get("v") == 0 for e in (f.get("pagewalk") or [])),
+             lambda ln: False),
+            ("jump site identified (ra in the register file)",
+             lambda f: _has(f, "regs", "ra"),
+             lambda ln: False),
+            ("causal parent (which run)",
+             lambda f: _has(f, "caused_by") and _has(f, "pid"),
+             lambda ln: False),
+        ],
+    },
+    "stackover": {  # store page fault from stack exhaustion
+        "cause_name": "store_page_fault",
+        "facts": [
+            ("cause classified",
+             lambda f: f.get("cause_name") == "store_page_fault",
+             lambda ln: "store_page_fault" in ln),
+            ("faulting address",
+             lambda f: _has(f, "stval"),
+             lambda ln: "stval=0x" in ln),
+            ("sp corroborates exhaustion (|sp - stval| < 4K, via regs)",
+             lambda f: _has(f, "regs", "sp") and _has(f, "stval")
+                       and abs(int(f["regs"]["sp"], 16) - int(f["stval"], 16)) < 4096,
+             lambda ln: False),
+            ("landed on a read-only data page (v=1, w=0, x=0 — NOT wxviol's x=1)",
+             lambda f: any(e.get("v") == 1 and e.get("w") == 0 and e.get("x") == 0
+                           for e in (f.get("pagewalk") or [])),
+             lambda ln: False),
+            ("causal parent (which run)",
+             lambda f: _has(f, "caused_by") and _has(f, "pid"),
+             lambda ln: False),
+        ],
+    },
 }
 
 # One curated suite runs the whole stimulus set (kernel-side `seed_suite_eval`).
@@ -112,31 +222,29 @@ SUITES = ["e"]
 
 
 def _collect(q, mcp, classic):
-    """Run the stimulus suites once; return faults keyed by cause_name. On the
-    agentic surface a fault is a JSON frame; on the classic surface it's a
-    printf line captured from the console noise channel."""
-    frames_by_cause = {}
+    """Run the stimulus suite once; return faults IN SEEDING ORDER (several
+    stimuli share a cause_name, so order — pid on the agentic surface, line
+    order on the classic one — is the only sound join key). On the agentic
+    surface a fault is a JSON frame; on the classic surface it's a printf line
+    captured from the console noise channel."""
+    frames_by_pid = {}
+    noise_before = len(q.stream.decoder.noise)
     for suite in SUITES:
         mcp.result("tools/call", {"name": "run_suite", "arguments": {"suite": suite}})
         while True:
-            f = q.stream.next_frame(timeout=30)
+            f = q.stream.next_frame(timeout=60)
             assert f is not None, "kernel exited during eval suite"
             e = json.loads(f)
             if e["type"] == "fault":
-                frames_by_cause[e["cause_name"]] = e
+                frames_by_pid[e["pid"]] = e
             if e["type"] == "suite_done":
                 break
     if not classic:
-        return frames_by_cause
-    # Classic surface: faults are raw lines in the decoder's noise channel.
-    lines_by_cause = {}
-    noise = bytes(q.stream.decoder.noise).decode(errors="replace")
-    for ln in noise.splitlines():
-        if "[FAULT]" in ln:
-            for bug in BUGS.values():
-                if bug["cause_name"] in ln:
-                    lines_by_cause[bug["cause_name"]] = ln
-    return lines_by_cause
+        return [frames_by_pid.get(pid) for pid in range(len(BUGS))]
+    # Classic surface: faults are raw lines in the decoder's noise channel,
+    # in payload order (sequential execution). Only lines from THIS run.
+    noise = bytes(q.stream.decoder.noise[noise_before:]).decode(errors="replace")
+    return [ln for ln in noise.splitlines() if "[FAULT]" in ln]
 
 
 def run_eval():
@@ -149,12 +257,16 @@ def run_eval():
         mcp.result("tools/call", {"name": "set_surface", "arguments": {"mode": "classic"}})
         classic = _collect(q, mcp, classic=True)
 
-    for name, bug in BUGS.items():
-        cause = bug["cause_name"]
-        frame = agentic.get(cause)
-        line = classic.get(cause)
+    assert len(classic) == len(BUGS), \
+        f"classic surface produced {len(classic)} fault lines for {len(BUGS)} stimuli"
+    for idx, (name, bug) in enumerate(BUGS.items()):
+        frame = agentic[idx]
+        line = classic[idx]
         assert frame is not None, f"agentic surface produced no fault for {name}"
-        assert line is not None, f"classic surface produced no fault line for {name}"
+        assert bug["cause_name"] == frame.get("cause_name"), \
+            f"{name}: expected {bug['cause_name']}, got {frame.get('cause_name')}"
+        assert bug["cause_name"] in line, \
+            f"{name}: classic line out of order or wrong cause: {line!r}"
         a_hits = [label for (label, af, _cf) in bug["facts"] if af(frame)]
         c_hits = [label for (label, _af, cf) in bug["facts"] if cf(line)]
         total = len(bug["facts"])

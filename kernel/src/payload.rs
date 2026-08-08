@@ -99,6 +99,13 @@ static DELEGATOR: &[u8] = include_bytes!(env!("PAYLOAD_DELEGATOR"));
 static REDELEGATOR: &[u8] = include_bytes!(env!("PAYLOAD_REDELEGATOR"));
 static WORKER: &[u8] = include_bytes!(env!("PAYLOAD_WORKER"));
 static BADJUMP: &[u8] = include_bytes!(env!("PAYLOAD_BADJUMP"));
+// The E1 stimulus-set expansion (toward the RFC's N≥20): five more seeded
+// faults, each demanding a DIFFERENT root-cause diagnosis (see eval.py).
+static BREAKER: &[u8] = include_bytes!(env!("PAYLOAD_BREAKER"));
+static MISALIGN: &[u8] = include_bytes!(env!("PAYLOAD_MISALIGN"));
+static NULLREAD: &[u8] = include_bytes!(env!("PAYLOAD_NULLREAD"));
+static EXECDATA: &[u8] = include_bytes!(env!("PAYLOAD_EXECDATA"));
+static STACKOVER: &[u8] = include_bytes!(env!("PAYLOAD_STACKOVER"));
 // craycast is a C payload (the `cpayloads` cargo feature); the default build is
 // pure Rust and needs no C toolchain, so its bytes are empty and its suite —
 // the only thing that loads it — is compiled out.
@@ -258,6 +265,38 @@ static IMAGES: &[Image] = &[
         caps: CAP_WRITE,
         deadline: 0,
     },
+    // E1 stimulus expansion: five more fault modes, one payload each —
+    // breakpoint, misaligned AMO, null deref, exec-of-data, stack overflow.
+    Image {
+        name: "breaker",
+        elf: BREAKER,
+        caps: CAP_WRITE,
+        deadline: 0,
+    },
+    Image {
+        name: "misalign",
+        elf: MISALIGN,
+        caps: CAP_WRITE,
+        deadline: 0,
+    },
+    Image {
+        name: "nullread",
+        elf: NULLREAD,
+        caps: CAP_WRITE,
+        deadline: 0,
+    },
+    Image {
+        name: "execdata",
+        elf: EXECDATA,
+        caps: CAP_WRITE,
+        deadline: 0,
+    },
+    Image {
+        name: "stackover",
+        elf: STACKOVER,
+        caps: CAP_WRITE,
+        deadline: 0,
+    },
 ];
 
 const IMG_HELLO: usize = 0;
@@ -279,6 +318,11 @@ const IMG_CRAYCAST: usize = 14;
 #[cfg(feature = "doom")]
 const IMG_DOOM: usize = 15;
 const IMG_LIVELOCK: usize = 16;
+const IMG_BREAKER: usize = 17;
+const IMG_MISALIGN: usize = 18;
+const IMG_NULLREAD: usize = 19;
+const IMG_EXECDATA: usize = 20;
+const IMG_STACKOVER: usize = 21;
 
 /// A read-only physical window an image needs mapped into its address space on
 /// top of its ELF — memory the kernel exposes that the payload does not
@@ -322,7 +366,9 @@ fn spawnable_image(selector: usize) -> Option<usize> {
 
 // ---- Process table ------------------------------------------------------
 
-const MAX_PROC: usize = 8;
+// 12: the E1 stimulus suite seeds 9 payloads at once; the process-table
+// frame-size const assert below keeps this honest.
+const MAX_PROC: usize = 12;
 const NO_PID: usize = usize::MAX;
 
 // Process states.
@@ -523,10 +569,20 @@ pub fn seed_suite_e2() {
 /// (toward the RFC's N≥20) without perturbing any acceptance check.
 pub fn seed_suite_eval() {
     clear_table();
-    enqueue(IMG_CRASHER, IMAGES[IMG_CRASHER].caps, NO_PID);
-    enqueue(IMG_WILD, IMAGES[IMG_WILD].caps, NO_PID);
-    enqueue(IMG_WXVIOL, IMAGES[IMG_WXVIOL].caps, NO_PID);
-    enqueue(IMG_BADJUMP, IMAGES[IMG_BADJUMP].caps, NO_PID);
+    // Seeding order == pid order == the order eval.py's BUGS table expects.
+    for img in [
+        IMG_CRASHER,
+        IMG_WILD,
+        IMG_WXVIOL,
+        IMG_BADJUMP,
+        IMG_BREAKER,
+        IMG_MISALIGN,
+        IMG_NULLREAD,
+        IMG_EXECDATA,
+        IMG_STACKOVER,
+    ] {
+        enqueue(img, IMAGES[img].caps, NO_PID);
+    }
 }
 
 /// craycast suite (operator 'c', `cpayloads` feature): the C raycaster. It

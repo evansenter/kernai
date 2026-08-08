@@ -16,6 +16,11 @@ members = [
     "redelegator",
     "worker",
     "badjump",
+    "breaker",
+    "misalign",
+    "nullread",
+    "execdata",
+    "stackover",
 ]
 
 [profile.release]
