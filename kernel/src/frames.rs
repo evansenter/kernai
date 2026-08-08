@@ -71,9 +71,9 @@ pub fn free(pa: usize) {
     }
 }
 
-/// Live frame count and pool capacity (surfaced as the /memory/framemap
-/// resource at M8; kept now so the allocator's state is queryable — P11).
-#[allow(dead_code)]
+/// Live frame count and pool capacity — the `memory` MCP resource (P11), and
+/// E7's allocator-soundness probe (allocated must return to baseline after
+/// every suite: no leak across the reap paths).
 pub fn stats() -> (usize, usize) {
     (ALLOCATED.load(RE), POOL_FRAMES)
 }

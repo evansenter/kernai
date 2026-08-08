@@ -106,6 +106,8 @@ static MISALIGN: &[u8] = include_bytes!(env!("PAYLOAD_MISALIGN"));
 static NULLREAD: &[u8] = include_bytes!(env!("PAYLOAD_NULLREAD"));
 static EXECDATA: &[u8] = include_bytes!(env!("PAYLOAD_EXECDATA"));
 static STACKOVER: &[u8] = include_bytes!(env!("PAYLOAD_STACKOVER"));
+// E7: the attenuation-lattice fuzzer (spawns workers with a requested-caps sweep).
+static FUZZDELEGATE: &[u8] = include_bytes!(env!("PAYLOAD_FUZZDELEGATE"));
 // craycast is a C payload (the `cpayloads` cargo feature); the default build is
 // pure Rust and needs no C toolchain, so its bytes are empty and its suite —
 // the only thing that loads it — is compiled out.
@@ -297,6 +299,14 @@ static IMAGES: &[Image] = &[
         caps: CAP_WRITE,
         deadline: 0,
     },
+    // fuzzdelegate: E7's lattice fuzzer — holds every cap, sweeps requested
+    // masks over spawn; each attempt's payload_spawn event is the evidence.
+    Image {
+        name: "fuzzdelegate",
+        elf: FUZZDELEGATE,
+        caps: CAP_WRITE | CAP_YIELD | CAP_SPAWN,
+        deadline: 0,
+    },
 ];
 
 const IMG_HELLO: usize = 0;
@@ -323,6 +333,7 @@ const IMG_MISALIGN: usize = 18;
 const IMG_NULLREAD: usize = 19;
 const IMG_EXECDATA: usize = 20;
 const IMG_STACKOVER: usize = 21;
+const IMG_FUZZDELEGATE: usize = 22;
 
 /// A read-only physical window an image needs mapped into its address space on
 /// top of its ELF — memory the kernel exposes that the payload does not
@@ -556,6 +567,12 @@ pub fn seed_suite_m10() {
 pub fn seed_suite_e2() {
     clear_table();
     enqueue(IMG_LIVELOCK, IMAGES[IMG_LIVELOCK].caps, NO_PID);
+}
+
+/// E7 suite (MCP `run_suite {suite:"e7"}`): the attenuation-lattice fuzzer.
+pub fn seed_suite_e7() {
+    clear_table();
+    enqueue(IMG_FUZZDELEGATE, IMAGES[IMG_FUZZDELEGATE].caps, NO_PID);
 }
 
 /// E1 stimulus suite (operator-triggered by 'e'): the curated seeded-fault set

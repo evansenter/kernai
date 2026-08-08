@@ -52,6 +52,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "fuzzdelegate"
+version = "0.1.0"
+dependencies = [
+ "sys",
+]
+
+[[package]]
 name = "hello"
 version = "0.1.0"
 dependencies = [

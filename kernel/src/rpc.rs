@@ -144,6 +144,7 @@ fn handle_tools_call(json: &str, id: &str) {
                 "d" | "m10" => payload::seed_suite_m10,
                 "e" | "eval" => payload::seed_suite_eval,
                 "l" | "e2" => payload::seed_suite_e2,
+                "e7" => payload::seed_suite_e7,
                 // Feature-build workloads are first-class on the agent plane
                 // too (P4): an agent starts DOOM the same way it starts any
                 // suite — no fallback to the single-byte channel required.
@@ -301,6 +302,11 @@ fn handle_resources_read(json: &str, id: &str) {
                 "reactive"
             };
             write!(f, r#"{{"autonomy":"{mode}"}}"#)
+        }),
+        Some("memory") => respond_result(id, |f| {
+            // P11: the frame allocator's live state (E7's leak/soundness probe).
+            let (allocated, capacity) = crate::frames::stats();
+            write!(f, r#"{{"allocated":{allocated},"capacity":{capacity}}}"#)
         }),
         Some("digest") => {
             // P3: the endpoint accepts a token/item budget parameter and returns
@@ -477,6 +483,12 @@ fn respond_resources_list(id: &str) {
             f,
             "autonomy",
             "The active autonomy dial (reactive|autonomous).",
+        )?;
+        f.write_str(",")?;
+        resource(
+            f,
+            "memory",
+            "Frame-allocator state: allocated/capacity (P11).",
         )?;
         f.write_str(",")?;
         resource(

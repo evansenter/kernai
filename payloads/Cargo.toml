@@ -21,6 +21,7 @@ members = [
     "nullread",
     "execdata",
     "stackover",
+    "fuzzdelegate",
 ]
 
 [profile.release]

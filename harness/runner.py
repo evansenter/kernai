@@ -916,6 +916,126 @@ def e3_cold_handoff():
         assert digest["by_severity"]["error"] >= 1, f"digest lost the fault: {digest}"
 
 
+@milestone("e7")
+def e7_attenuation_soundness():
+    """E7 seed: attenuation soundness (P10) + allocator soundness. A fuzzer
+    payload holding every cap sweeps requested-cap masks over spawn; EVERY
+    resulting payload_spawn event must satisfy the lattice — granted ==
+    requested & parent & ceiling, hence granted ⊆ parent (no widening, ever).
+    The M10 delegation chain is re-validated event-by-event the same way. And
+    the frame allocator must return exactly to its post-boot baseline after
+    every suite (the `memory` resource): no leak across any reap path."""
+    from .mcp import Mcp
+    from .qemu import QemuKernel
+
+    CAPS = {"write": 1, "yield": 2, "spawn": 4}
+    CEILING = {"worker": 1, "redelegator": 5, "child": 3}  # image cap masks
+
+    def mask(names):
+        return sum(CAPS[c] for c in names)
+
+    def run_and_collect(q, m, suite):
+        spawns = []
+        m.result("tools/call", {"name": "run_suite", "arguments": {"suite": suite}})
+        while True:
+            e = json.loads(q.stream.next_frame(timeout=60))
+            if e["type"] == "payload_spawn":
+                spawns.append(e)
+            if e["type"] == "suite_done":
+                return spawns
+
+    with QemuKernel() as q:
+        assert json.loads(q.stream.next_frame(timeout=60))["type"] == "hello"
+        m = Mcp(q)
+        m.result("initialize")
+        baseline = m.result("resources/read", {"uri": "memory"})["allocated"]
+        assert baseline > 0
+
+        total_spawns = 0
+        for suite in ("e7", "d", "e7"):
+            spawns = run_and_collect(q, m, suite)
+            assert spawns, f"suite {suite} produced no spawn events"
+            for ev in spawns:
+                total_spawns += 1
+                parent = mask(ev["parent_caps"])
+                req = mask(ev["requested"])
+                got = mask(ev["granted"])
+                ceil = CEILING[ev["name"]]
+                assert got == req & parent & ceil, \
+                    f"lattice violated: {ev} (expected {req & parent & ceil:#x})"
+                assert got & ~parent == 0, f"widened past parent: {ev}"
+                assert ev["attenuated"] == (req != got), f"attenuated flag: {ev}"
+            after = m.result("resources/read", {"uri": "memory"})["allocated"]
+            assert after == baseline, \
+                f"allocator leak after suite {suite}: {baseline} -> {after}"
+        # The fuzzer swept 5 masks twice + the M10 chain's 2 hops.
+        assert total_spawns >= 12, f"only {total_spawns} spawn events fuzzed"
+
+
+@milestone("e8")
+def e8_token_economics():
+    """E8 seed: token economics (P3). Operator "tokens" ≈ wire bytes the surface
+    spends. Measured three ways over the SAME workload: (a) reactive — every
+    tick frame streams; (b) autonomous — trace-severity ticks suppressed; (c)
+    the budgeted digest — one coalesced summary instead of the firehose. The
+    autonomy dial and the digest budget must each strictly reduce the byte cost,
+    with the digest capped by its budget — P3 made quantitative."""
+    from .mcp import Mcp
+    from .qemu import QemuKernel
+
+    def cost(mode):
+        with QemuKernel() as q:
+            assert json.loads(q.stream.next_frame(timeout=60))["type"] == "hello"
+            m = Mcp(q)
+            m.result("initialize")
+            if mode == "autonomous":
+                m.result("tools/call",
+                         {"name": "set_autonomy", "arguments": {"mode": "autonomous"}})
+            # Identical workload on every arm: the M4 suite (writes, a spawn, a
+            # deadline kill) surrounded by free-running ticks.
+            m.result("tools/call", {"name": "run_suite", "arguments": {"suite": "m"}})
+            wire = 0
+            ticks = 0
+            while True:
+                fr = q.stream.next_frame(timeout=60)
+                assert fr is not None, "kernel exited during e8 workload"
+                wire += len(fr)
+                e = json.loads(fr)
+                if e["type"] == "tick":
+                    ticks += 1
+                if e["type"] == "suite_done":
+                    break
+            # The budgeted digest: what a token-frugal operator pulls INSTEAD of
+            # reading the stream — a single bounded frame.
+            digest_frame = None
+            rid = m.send("resources/read", {"uri": "digest", "budget": 3})
+            while True:
+                fr = q.stream.next_frame(timeout=30)
+                e = json.loads(fr)
+                if e.get("type") == "rpc" and e.get("rpc", {}).get("id") == rid:
+                    digest_frame = fr
+                    break
+            return wire, ticks, len(digest_frame), json.loads(digest_frame)
+
+    reactive_wire, reactive_ticks, _, _ = cost("reactive")
+    auto_wire, auto_ticks, digest_bytes, digest = cost("autonomous")
+
+    # (a) vs (b): suppressing trace ticks strictly cuts the byte cost, and the
+    # digest still ACCOUNTS for every suppressed tick (P3: coalesced, not lost).
+    assert auto_ticks < reactive_ticks, \
+        f"autonomy did not suppress ticks: {auto_ticks} vs {reactive_ticks}"
+    assert auto_wire < reactive_wire, \
+        f"autonomy did not cut wire cost: {auto_wire} vs {reactive_wire}"
+    rpc = digest["rpc"]["result"]
+    assert rpc["totals"]["timer"] >= reactive_ticks, \
+        f"digest lost suppressed ticks: {rpc['totals']} vs {reactive_ticks} observed"
+    # (c): the digest is a bounded summary — capped by budget, far under the
+    # firehose it replaces.
+    assert len(rpc["items"]) <= 3, f"digest exceeded its budget: {rpc}"
+    assert digest_bytes < reactive_wire, \
+        f"digest ({digest_bytes}B) not cheaper than the stream ({reactive_wire}B)"
+
+
 @milestone("determinism")
 def determinism_two_boots():
     """P9 seed (E6): two input-free boots yield byte-identical event streams."""

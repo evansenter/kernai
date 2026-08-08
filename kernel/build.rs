@@ -29,6 +29,7 @@ fn main() {
         "nullread",
         "execdata",
         "stackover",
+        "fuzzdelegate",
     ] {
         let path = format!("{payload_dir}/{name}");
         if !Path::new(&path).exists() {
