@@ -7,7 +7,7 @@
 TARGET     := riscv64gc-unknown-none-elf
 KERNEL_ELF := kernel/target/$(TARGET)/release/kernai
 
-.PHONY: build payloads run debug gdb demo eval agent-eval raycast doom doom-play test fmt clippy unsafe-budget clean
+.PHONY: build payloads run debug gdb demo eval agent-eval conformance raycast doom doom-play test fmt clippy unsafe-budget clean
 
 # Payloads build first: the kernel embeds their ELFs via include_bytes!
 # (kernel/build.rs fails loudly if they're missing).
@@ -43,6 +43,14 @@ eval: build
 # a real Claude model for the per-model numbers.
 agent-eval: build
 	python3 -m harness.agent_loop
+
+# Conformance: drive kernai and the degraded reference implementation
+# (refimpl/daemon.py) through the same MCP session; show that one surface is
+# targetable by two mechanisms and where the degraded one loses diagnostic
+# detail. The eval suite becomes a benchmark for implementations, not just
+# rendering modes.
+conformance: build
+	python3 -m harness.conformance
 
 # Optional demo: a C-language fixed-point raycaster (Wolfenstein-lite, Doom's
 # ancestor) running as a sandboxed kernai payload, rendered as ASCII frames.
