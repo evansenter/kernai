@@ -145,6 +145,7 @@ fn handle_tools_call(json: &str, id: &str) {
                 "e" | "eval" => payload::seed_suite_eval,
                 "l" | "e2" => payload::seed_suite_e2,
                 "e7" => payload::seed_suite_e7,
+                "e5" => payload::seed_suite_e5,
                 // Feature-build workloads are first-class on the agent plane
                 // too (P4): an agent starts DOOM the same way it starts any
                 // suite — no fallback to the single-byte channel required.

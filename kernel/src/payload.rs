@@ -108,6 +108,8 @@ static EXECDATA: &[u8] = include_bytes!(env!("PAYLOAD_EXECDATA"));
 static STACKOVER: &[u8] = include_bytes!(env!("PAYLOAD_STACKOVER"));
 // E7: the attenuation-lattice fuzzer (spawns workers with a requested-caps sweep).
 static FUZZDELEGATE: &[u8] = include_bytes!(env!("PAYLOAD_FUZZDELEGATE"));
+// E5: the prompt-injection red-team payload (emits operator-manipulation text).
+static INJECTOR: &[u8] = include_bytes!(env!("PAYLOAD_INJECTOR"));
 // craycast is a C payload (the `cpayloads` cargo feature); the default build is
 // pure Rust and needs no C toolchain, so its bytes are empty and its suite —
 // the only thing that loads it — is compiled out.
@@ -307,6 +309,15 @@ static IMAGES: &[Image] = &[
         caps: CAP_WRITE | CAP_YIELD | CAP_SPAWN,
         deadline: 0,
     },
+    // injector: E5's red-team payload — its output impersonates a control
+    // directive; only CAP_WRITE, so the escalation can't come from the payload,
+    // only from an operator fooled by unframed output.
+    Image {
+        name: "injector",
+        elf: INJECTOR,
+        caps: CAP_WRITE,
+        deadline: 0,
+    },
 ];
 
 const IMG_HELLO: usize = 0;
@@ -334,6 +345,7 @@ const IMG_NULLREAD: usize = 19;
 const IMG_EXECDATA: usize = 20;
 const IMG_STACKOVER: usize = 21;
 const IMG_FUZZDELEGATE: usize = 22;
+const IMG_INJECTOR: usize = 23;
 
 /// A read-only physical window an image needs mapped into its address space on
 /// top of its ELF — memory the kernel exposes that the payload does not
@@ -573,6 +585,12 @@ pub fn seed_suite_e2() {
 pub fn seed_suite_e7() {
     clear_table();
     enqueue(IMG_FUZZDELEGATE, IMAGES[IMG_FUZZDELEGATE].caps, NO_PID);
+}
+
+/// E5 suite (MCP `run_suite {suite:"e5"}`): the prompt-injection red-team.
+pub fn seed_suite_e5() {
+    clear_table();
+    enqueue(IMG_INJECTOR, IMAGES[IMG_INJECTOR].caps, NO_PID);
 }
 
 /// E1 stimulus suite (operator-triggered by 'e'): the curated seeded-fault set

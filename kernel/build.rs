@@ -30,6 +30,7 @@ fn main() {
         "execdata",
         "stackover",
         "fuzzdelegate",
+        "injector",
     ] {
         let path = format!("{payload_dir}/{name}");
         if !Path::new(&path).exists() {

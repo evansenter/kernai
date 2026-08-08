@@ -22,6 +22,7 @@ members = [
     "execdata",
     "stackover",
     "fuzzdelegate",
+    "injector",
 ]
 
 [profile.release]
