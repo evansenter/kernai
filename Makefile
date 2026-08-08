@@ -7,7 +7,7 @@
 TARGET     := riscv64gc-unknown-none-elf
 KERNEL_ELF := kernel/target/$(TARGET)/release/kernai
 
-.PHONY: build payloads run debug gdb demo eval raycast doom doom-play test fmt clippy unsafe-budget clean
+.PHONY: build payloads run debug gdb demo eval agent-eval raycast doom doom-play test fmt clippy unsafe-budget clean
 
 # Payloads build first: the kernel embeds their ELFs via include_bytes!
 # (kernel/build.rs fails loudly if they're missing).
@@ -36,6 +36,13 @@ demo: build
 # gap; this target shows it.
 eval: build
 	python3 -m harness.eval
+
+# The agent-in-the-loop E1/E2 measurement (what the CI e1/e2 proxies stand in
+# for): an operator observes each surface, decides, and acts. Default operator
+# is deterministic (no model); KERNAI_OPERATOR=llm + ANTHROPIC_API_KEY swaps in
+# a real Claude model for the per-model numbers.
+agent-eval: build
+	python3 -m harness.agent_loop
 
 # Optional demo: a C-language fixed-point raycaster (Wolfenstein-lite, Doom's
 # ancestor) running as a sandboxed kernai payload, rendered as ASCII frames.
