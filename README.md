@@ -4,7 +4,7 @@ An agent-native RISC-V unikernel. See `docs/RFC-001-agent-native-kernel.md` for
 the thesis and `CLAUDE.md` for working conventions. New here — or new to
 kernels entirely? Start with `docs/WALKTHROUGH.md`, then run `make demo`.
 
-Current state: **M12 (ladder complete)** — boot, traps, SBI timer, trap ring,
+Current state: **M13 + the full E1–E8 eval spine** — boot, traps, SBI timer, trap ring,
 structured fault reports (M0–M2); U-mode payloads running to `sys_exit`, a payload crash kills
 only the payload (M3); a capability-gated syscall surface with spawn
 attenuation and instruction-count deadline kill (M4); per-payload Sv39 paging
@@ -20,10 +20,12 @@ the E1 A/B (M9); a multi-hop delegation chain proving capabilities only ever
 attenuate, never re-widen, even under a greedy "request everything" at each hop
 (M10, P10); an autonomy dial plus a token-budgeted `digest` resource that
 coalesces the event firehose into a bounded severity-ranked summary (M11, P3);
-and the E1 evaluation — scoring the two diagnostic surfaces over a seeded-fault
-set (the structured surface recovers 17/17 localization facts, the classic
-printf twin 8/17), plus the published surface spec (M12, `docs/SPEC.md`). The
-**M0–M13 ladder + the full E1–E8 eval spine are complete** (22 `make test` checks); DOOM runs as a sandboxed payload. `make eval` prints the E1 scorecard; `docs/DESIGN.md` is the writeup.
+the E1 evaluation over a 9-fault stimulus set (the structured surface recovers
+40/40 localization facts, the classic printf twin 19/40); the input-driven
+preemptive control plane and the `kill`/`set_budget` remediation verbs (M13);
+and the full RFC eval spine E1–E8 as CI checks plus a degraded reference
+implementation for cross-implementation conformance. The
+**M0–M13 ladder + the full E1–E8 eval spine are complete** (22 `make test` checks); DOOM runs as a sandboxed payload (play + checkpoint/fork). `make eval` prints the E1 scorecard; `docs/DESIGN.md` is the writeup.
 
 ## Bootstrap (Ubuntu 24.04 or similar)
 
@@ -97,7 +99,9 @@ replays to a bit-identical event stream — see `harness/runner.py::m7`.
 ```
 kernel/    no_std kernel; src/hal/ is the only unsafe island (budget-enforced)
 payloads/  cargo workspace of tiny rv64 U-mode payloads (sys runtime + fixtures)
-harness/   host-side Python driver: framing, QEMU transport, milestone runner
+           + doom/ (the DOOM port: picolibc shims + linker script, doom feature)
+harness/   host-side Python driver: framing, QEMU transport, runner, evals, DOOM
+refimpl/   degraded reference implementation of the surface (make conformance)
 ci/        unsafe budget check, GitHub Actions helpers
-docs/      RFC-001, ARCHITECTURE.md, DECISIONS.md, HANDOFF.md
+docs/      RFC-001, DESIGN.md, SPEC.md, ARCHITECTURE.md, DECISIONS.md, HANDOFF.md
 ```
