@@ -787,6 +787,73 @@ def e1_diagnostic_sufficiency():
         assert ah > ch, f"{name}: agentic {ah} not strictly > classic {ch}"
 
 
+@milestone("e2")
+def e2_live_mttr():
+    """E2 seed (live-incident MTTR mechanism): a livelocked payload — spinning
+    forever, no deadline, nothing kernel-side will ever end it — is remediated
+    WHILE IT RUNS, via the control plane only. The MCP `kill` frame forces an
+    M13 preemption (the tick suspends the payload, the scheduler services the
+    plane), the kill lands, and the structured events carry the whole
+    mitigation timeline: sched preempt → payload_killed (reason, elapsed,
+    causal anchor) → suite_done, with the kernel alive throughout."""
+    from .mcp import Mcp
+    from .qemu import QemuKernel
+
+    with QemuKernel() as q:
+        assert json.loads(q.stream.next_frame(timeout=60))["type"] == "hello"
+        m = Mcp(q)
+        m.result("initialize")
+        seen = []
+        acc = m.result("tools/call",
+                       {"name": "run_suite", "arguments": {"suite": "e2"}},
+                       collect=seen)
+        assert acc["status"] == "accepted", f"e2 suite not accepted: {acc}"
+
+        # The incident: livelock starts and just keeps running (deadline 0).
+        # Prove it is genuinely live — it survives a stretch of ticks without
+        # exiting, faulting, or being killed by any kernel machinery.
+        start = None
+        ticks_after = 0
+        while ticks_after < 8:
+            e = json.loads(q.stream.next_frame(timeout=30))
+            if e["type"] == "payload_start" and e["name"] == "livelock":
+                start = e
+            elif e["type"] in ("payload_exit", "fault", "payload_killed",
+                               "suite_done"):
+                raise AssertionError(f"livelock ended without remediation: {e}")
+            elif start is not None and e["type"] == "tick":
+                ticks_after += 1
+        assert start is not None
+
+        # Remediation, control plane only, against the RUNNING payload.
+        resp = m.result("tools/call",
+                        {"name": "kill", "arguments": {"pid": 0},
+                         "opId": "e2-kill"},
+                        collect=seen)
+        assert resp["status"] == "killed" and resp["pid"] == 0, f"kill: {resp}"
+        assert resp["elapsed"] > 0, f"no MTTR fact in the kill ack: {resp}"
+
+        # The mitigation timeline is structured and causally anchored (P12).
+        sched = [e for e in seen if e.get("type") == "sched"]
+        assert sched and sched[-1]["action"] == "preempt" \
+            and sched[-1]["reason"] == "pending_input", f"no preemption: {sched}"
+        killed = [e for e in seen if e.get("type") == "payload_killed"]
+        assert killed and killed[-1]["reason"] == "operator", f"killed: {killed}"
+        assert killed[-1]["caused_by"] == start["id"], \
+            f"kill not anchored at the start event: {killed[-1]} vs {start['id']}"
+        assert killed[-1]["elapsed"] > 0
+
+        # The suite closes; the kernel is alive and still answering.
+        while True:
+            e = json.loads(q.stream.next_frame(timeout=30))
+            if e["type"] == "suite_done":
+                assert e["killed"] == 1, f"suite_done miscounts: {e}"
+                break
+        procs = m.result("resources/read", {"uri": "processes"})["processes"]
+        assert procs[0]["name"] == "livelock" and procs[0]["state"] == "killed", \
+            f"processes: {procs}"
+
+
 @milestone("e3")
 def e3_cold_handoff():
     """E3 seed: a fresh operator reconstructs situational awareness purely from

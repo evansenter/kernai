@@ -48,7 +48,8 @@ consumes one) but never repeat or decrease.
 | `payload_exit` | `pid`, `code`, `caused_by` | clean exit |
 | `payload_spawn` | `parent`, `child`, `name`, `parent_caps[]`, `requested[]`, `granted[]`, `attenuated` | delegation; `granted ⊆ requested & parent_caps & ceiling` (P10) |
 | `syscall_denied` | `pid`, `syscall`, `cap`, `reason` | a capability-gated call was refused (P1: a refusal is an event) |
-| `payload_killed` | `pid`, `reason`, `elapsed`, `deadline`, `caused_by` | instruction-budget preemption (P2) |
+| `payload_killed` | `pid`, `reason`, `elapsed`, `deadline?`, `caused_by` | a payload was ended by policy: `reason:"deadline"` (instruction budget, P2, carries `deadline`) or `reason:"operator"` (the `kill` tool / doom kill key; `elapsed` = timebase units since start — the E2 MTTR fact; `caused_by` null if killed before its start event) |
+| `sched` | `action:"preempt"`, `pid`, `reason:"pending_input"`, `caused_by` | M13: the scheduler suspended a payload to service pending control-plane input; it resumes silently afterward (P11: the scheduler explains itself) |
 | `snapshot` | `pid`, `snapshot` | a checkpoint was taken (P8) |
 | `payload_load_fault` | `pid`, `name`, `reason` | a payload's ELF failed to load / map (e.g. out of memory) |
 | `payload_yield` | `pid` | a `Cap::Yield`-holding payload yielded |
@@ -107,8 +108,9 @@ Errors use `"error":{"code":,"message":}` (JSON-RPC codes: -32600 invalid,
 
 | tool | arguments | effect |
 |------|-----------|--------|
-| `run_suite` | `{suite: p\|m\|i\|f\|d\|e}` | run a workload suite; async — returns `{status:"accepted"}`, events stream, `suite_done` is completion |
-| `crash` | — | deliberate kernel fault → shutdown |
+| `run_suite` | `{suite: p\|m\|i\|f\|d\|e\|e2}` | run a workload suite; async — returns `{status:"accepted"}`, events stream, `suite_done` is completion. Answers `busy` (-32002) while payloads are alive |
+| `crash` | — | deliberate kernel fault → shutdown. Answers `busy` while payloads are alive |
+| `kill` | `{pid}` | kill a live payload — servable MID-RUN via an M13 preemption (E2 remediation). Returns `{status:"killed", pid, elapsed}`; emits `payload_killed reason:"operator"` |
 | `ring_read` | — | the trap ring as a result |
 | `set_surface` | `{mode: agentic\|classic}` | select the diagnostic surface (§5, P6/E1) |
 | `set_autonomy` | `{mode: reactive\|autonomous}` | the autonomy dial (§4, P1/P3) |

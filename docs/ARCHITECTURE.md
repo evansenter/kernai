@@ -140,8 +140,20 @@ next. Queue drains → `suite_done` → `idle`.
   the classic printf twin 8/17 (`make eval`; the `e1` check asserts the gap).
   `e3` reconstructs state from resources alone (cold handoff); `e6` is M7's
   replay. The MCP surface is published as `docs/SPEC.md` v0.1 — the RFC's
-  durable artifact. Remaining evals (full agent-loop E1, E2/E4/E5/E7/E8) are
-  future work; the M0–M12 ladder is complete.
+  durable artifact. Remaining evals (full agent-loop E1, E4/E5/E7/E8, and the
+  full E2 A/B measurement) are future work; the M0–M12 ladder is complete.
+- **P1/P2/E2 (M13, done)**: the control plane is live while payloads run. A
+  timer tick that finds serial input pending (for a payload that hasn't opted
+  into keyboard input) suspends the payload — its register file saved the same
+  way M6 checkpoints save one — emits a `sched preempt` event (P11), services
+  the plane in the scheduler (`payload::service_console`: JSON-RPC frames + the
+  ring-dump byte; suite-seeding/crash verbs answer `busy` mid-run), and resumes
+  it silently: no new `payload_start`, deadline budget not refilled, causal
+  anchor unchanged. Preemption is input-driven only, so input-free runs are
+  byte-identical to before (P9/m7 unaffected). On top of it: the `kill {pid}`
+  tool (opId-idempotent) emits `payload_killed reason:"operator"` with
+  `elapsed` — the time-to-mitigation fact — and the `e2` acceptance check
+  remediates a deadline-less `livelock` payload live, control-plane only.
 
 ## Beyond the ladder: C payloads and DOOM (optional features)
 

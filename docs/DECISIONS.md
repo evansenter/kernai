@@ -709,3 +709,49 @@ or kernel-side input logging — the key ring is already the single choke point 
 kernel-native input log would hook). Input-free DOOM runs remain boot-for-boot
 deterministic with no rr needed (re-verified this session: 200 identical
 checksums).
+
+**2026-08-08 · M13 · Preemptive control plane: pending input suspends the payload; the scheduler serves MCP between slices; `kill` is E2's remediation verb.**
+The HANDOFF ladder's big unlock. Before M13 the control plane was deaf while a
+payload ran (single-threaded run-to-completion); E2 — remediate a live incident
+via control plane only — was structurally impossible, and the input-seam audit
+had to document the deafness as a residual. Now:
+
+- **Preemption is input-driven, not time-sliced.** A timer tick that finds a
+  serial byte pending (for a payload that has NOT opted into keyboard input)
+  saves the payload's register file into its slot's resume frame — the same
+  save M6 checkpoints use — marks it PENDING+preempted, emits a `sched
+  preempt` event (P11: the scheduler explains its decision), and redirects to
+  the scheduler. The scheduler services the plane (`service_console`: the
+  stashed byte, then JSON-RPC frames / the ring-dump byte; suite-seeding and
+  crash bytes stay idle-only), reaps, and resumes the payload **silently**: no
+  new `payload_start`, `started_at` untouched (a suspension must not refill a
+  deadline budget), causal anchor unchanged. With no operator traffic there is
+  no preemption at all — which is why input-free determinism (P9) and m7
+  record/replay pass unchanged. Alternatives considered: fixed time-slicing
+  (steady overhead + event noise for nothing when nobody is talking; policy
+  the RFC says belongs to the operator anyway) and servicing MCP inside the
+  trap handler (interrupts-off JSON parsing on the trap stack — latency and
+  stack risk for zero architectural gain).
+- **`kill {pid}`** (MCP tool, opId-idempotent): mark a live payload KILLED and
+  emit `payload_killed reason:"operator"` with `elapsed` (timebase units since
+  start — the time-to-mitigation numerator) and the P12 causal anchor. The
+  doom-build 0x03 key and the tool now share one emitter. `run_suite`/`crash`
+  gained a `busy` refusal when payloads are alive: remediation verbs work
+  mid-run, destructive-reseed verbs do not.
+- **`livelock`** (E2 pathology): the runaway ELF with deadline 0 — nothing
+  kernel-side will ever end it; only live remediation can. `run_suite e2`
+  seeds it; there is deliberately no single-byte trigger (E2 is control-plane
+  only, per the RFC).
+- **The `e2` acceptance check** (in `make test`, now 18 checks): livelock
+  survives a stretch of ticks, then one MCP `kill` mid-run → asserts the
+  preempt event, the killed event (reason/elapsed/anchor), `suite_done
+  killed:1`, and a live kernel after. The full E2 *measurement* (A/B across
+  surfaces with an LLM operator) remains future work like e1's full version;
+  the mechanism and every timeline fact it needs are now in place.
+
+Doom interplay: an input-wanting payload owns its serial (v2 key protocol,
+bytes drained before the preempt check) — DOOM is never preempted by its own
+keystrokes; non-input payloads on doom builds get the same live plane as the
+default build. The audit's residual ("the plane is deaf while a payload runs")
+is retired for every payload except DOOM itself, where the deafness is now a
+deliberate property of owning the input channel.

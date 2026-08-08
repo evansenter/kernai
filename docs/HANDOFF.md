@@ -6,7 +6,8 @@ beyond this repo (we dogfood E3 on ourselves).
 ## Current state (2026-07-19, session 3)
 
 **M0–M12 complete and green, and — beyond the ladder — full DOOM runs as a
-sandboxed payload.** `make test` from a fresh clone runs seventeen checks in
+sandboxed payload — and, since M13, the control plane is live while payloads
+run.** `make test` from a fresh clone runs eighteen checks in
 ~11 seconds (fmt + clippy + build + unsafe budget first) and stays **pure Rust**:
 the DOOM/C work is entirely behind off-by-default cargo features, so nothing
 below changed and CI needs no C toolchain.
@@ -80,10 +81,15 @@ The seventeen acceptance checks (unchanged):
     the structured surface recovers every localization fact (17/17) and the
     classic printf twin far fewer (8/17) — the gap is the root-cause detail P6
     says decides debuggability (`make eval` prints the scorecard)
-15. `e3` — cold handoff: a fresh reader reconstructs state from the
+15. `e2` — live-incident MTTR mechanism (M13): a deadline-less `livelock`
+    payload is killed WHILE IT RUNS via the MCP `kill` tool, serviced through
+    an input-driven preemption; asserts the `sched preempt` event, the
+    causally-anchored `payload_killed` (reason, `elapsed` — the
+    time-to-mitigation fact), `suite_done killed:1`, and a live kernel after
+16. `e3` — cold handoff: a fresh reader reconstructs state from the
     spec/processes/digest resources alone (P5/P11/P12)
-16. `determinism` — two input-free boots byte-identical (P9 / E6 seed)
-17. `demo` — the narrated `make demo` (now 11 acts, incl. MCP + two-surface)
+17. `determinism` — two input-free boots byte-identical (P9 / E6 seed)
+18. `demo` — the narrated `make demo` (now 11 acts, incl. MCP + two-surface)
 
 CI (`.github/workflows/ci.yml`) runs the same gate + `ci/unsafe_budget.sh`
 on every push. **Unsafe budget: 55/200 lines in 4/4 hal files** — the file
@@ -152,23 +158,26 @@ client and `runner.py::m8`…`m11` for full sessions.
 
 ## Exact next step
 
-**The M0–M12 ladder is complete and green, and full DOOM runs on it.** All
-twelve milestones and their acceptance checks are in `make test`; the twelve
+**The M0–M13 ladder is complete and green, and full DOOM runs on it.** All
+milestones and their acceptance checks are in `make test`; the twelve
 principles P1–P12 each have a concrete, tested mechanism; the MCP surface is
-published (`docs/SPEC.md`); and DOOM (the `doom` feature) is a working
-demonstration that the isolation model holds for a large real-world C workload.
+published (`docs/SPEC.md`); DOOM (the `doom` feature) demonstrates the
+isolation model on a large real-world C workload; and M13's input-driven
+preemption makes the control plane live against running payloads — the `e2`
+check remediates a livelocked payload mid-run via the `kill` tool, control
+plane only.
 
 Expansion directions, in the RFC's spirit (pick by value; none is blocking):
 
 0. **DOOM polish (optional).** Input, kill, MCP-start, and P8-compatibility are
    DONE (`make doom-play`). Still open, all non-blocking: sound is dropped; the
    `fbchunk` keyframe stream is throttled by `COLOR_EVERY` but not governed by
-   the P3 budget machinery (the autonomy dial governs trap frames only); the
-   control plane is deaf *while* a payload runs (single-threaded — interactive
-   input rides the kernel-mediated raw serial channel, and full mid-run MCP
-   service is the same preemptive-scheduling work as E2 below); and a
-   DOOM-checkpoint demo (fork a game mid-level into what-if continuations —
-   the mm groundwork is in) would be a strong P8 showcase.
+   the P3 budget machinery (the autonomy dial governs trap frames only); DOOM
+   itself stays un-preemptible while running (it owns the serial line for
+   keystrokes — a deliberate M13 property, not a gap; every other payload gets
+   the live plane); and a DOOM-checkpoint demo (fork a game mid-level into
+   what-if continuations — the mm groundwork is in) would be a strong P8
+   showcase.
 
 1. **Grow the E1 stimulus set toward N≥20** (RFC E1). Add seeded faults with
    distinct diagnosis needs (unmapped-address load, misaligned access, a stack
@@ -178,11 +187,13 @@ Expansion directions, in the RFC's spirit (pick by value; none is blocking):
    surface-content proxy (facts-recoverable). The real experiment drives an LLM
    operator over each surface and measures localization rate/time/tokens; it
    needs model access, so it belongs in `make eval`/a separate harness, not CI.
-3. **E2 (live-incident MTTR)** needs operator-initiated remediation (kill a
-   payload, set a budget) *while it runs* — which needs preemptive scheduling.
-   The suspend/resume primitive exists (`hal::resume_user`); wiring a real
-   scheduler (save the running frame on preempt, resume another slot) unlocks
-   E2 and a `kill`/`set_budget` control-plane tool (RFC P4's named tools).
+3. **E2 mechanism: DONE (M13).** Input-driven preemption + the `kill` tool +
+   the `livelock` pathology + the `e2` acceptance check are in. What remains of
+   E2 proper is the *measurement*: the A/B across surfaces with an LLM operator
+   (same model-access dependency as item 2 — the two share a harness), a richer
+   pathology set (leaking payload, runaway spawn loop — both need only new
+   fixtures, the remediation verb exists), and a `set_budget` tool (adjust a
+   live payload's deadline — small, now that the plane is live mid-run).
 4. **A degraded reference implementation** (a Linux daemon speaking the same
    `docs/SPEC.md` surface — no true checkpoint/fork, but real) so the eval suite
    becomes a public benchmark for *both* kernel surfaces and operator agents.

@@ -248,6 +248,16 @@ static IMAGES: &[Image] = &[
         caps: CAP_WRITE,
         deadline: 0,
     },
+    // livelock: the E2 pathology — the same spinning ELF as runaway but with NO
+    // deadline, so the kernel's own budget machinery will never end it. The only
+    // way out is live operator remediation over the control plane (the `kill`
+    // tool through an M13 preemption) — which is exactly what E2 measures.
+    Image {
+        name: "livelock",
+        elf: RUNAWAY,
+        caps: CAP_WRITE,
+        deadline: 0,
+    },
 ];
 
 const IMG_HELLO: usize = 0;
@@ -268,6 +278,7 @@ const IMG_BADJUMP: usize = 13;
 const IMG_CRAYCAST: usize = 14;
 #[cfg(feature = "doom")]
 const IMG_DOOM: usize = 15;
+const IMG_LIVELOCK: usize = 16;
 
 /// A read-only physical window an image needs mapped into its address space on
 /// top of its ELF — memory the kernel exposes that the payload does not
@@ -337,6 +348,11 @@ struct Slot {
     /// Pool frame holding a saved trap frame to resume from (M6 restore);
     /// 0 = start fresh from the ELF entry.
     resume_frame: AtomicUsize,
+    /// This PENDING slot is a *preempted* payload (M13), not a fresh restore:
+    /// resume it silently — no new `payload_start`, keep the original
+    /// `started_at` (a preemption must not refill a deadline budget) and the
+    /// original causal anchor.
+    preempted: AtomicBool,
     /// Event id of this payload's `payload_start` (P12 causal spine): every
     /// event this payload produces — output, exit, fault, kill — names it as
     /// its `caused_by`, so the log is a DAG rooted at the start, not a line.
@@ -355,6 +371,7 @@ impl Slot {
             deadline: AtomicU64::new(0),
             root: AtomicUsize::new(0),
             resume_frame: AtomicUsize::new(0),
+            preempted: AtomicBool::new(false),
             start_event: AtomicU64::new(0),
         }
     }
@@ -484,6 +501,17 @@ pub fn seed_suite_m10() {
     enqueue(IMG_DELEGATOR, IMAGES[IMG_DELEGATOR].caps, NO_PID);
 }
 
+/// E2 stimulus suite (MCP `run_suite {suite:"e2"}` — deliberately control-plane
+/// only, no single-byte trigger): one livelocked payload, no deadline. The
+/// operator must notice it (digest/ticks), then remediate it LIVE via the
+/// `kill` tool — serviced through an M13 preemption while the payload spins.
+/// The whole E2 loop — observe, diagnose, mitigate — happens over the
+/// structured plane against a running incident.
+pub fn seed_suite_e2() {
+    clear_table();
+    enqueue(IMG_LIVELOCK, IMAGES[IMG_LIVELOCK].caps, NO_PID);
+}
+
 /// E1 stimulus suite (operator-triggered by 'e'): the curated seeded-fault set
 /// for the diagnostic-surface evaluation (M12). Four distinct fault modes so
 /// the surface benchmark spans more than one kind of bug:
@@ -533,6 +561,7 @@ fn enqueue(image: usize, caps: u32, parent: usize) -> Option<usize> {
             slot.started_at.store(0, RE);
             slot.root.store(0, RE);
             slot.resume_frame.store(0, RE);
+            slot.preempted.store(false, RE);
             // Reset the causal anchor: a reused slot must never let an early
             // terminal event (e.g. an operator kill outracing emit_start) name
             // a PREVIOUS occupant's start as its cause. 0 = unset (the id 0
@@ -570,6 +599,12 @@ pub fn run() -> ! {
     CURRENT.store(NO_PID, RE);
     hal::write_satp(kernel_satp());
     reap_terminated();
+    // M13: serve the control plane between slices — the byte that triggered a
+    // preemption (plus anything queued behind it) is handled here, so an
+    // operator can inspect and remediate live payloads (E2). A `kill` issued
+    // here marks a slot terminal; reap again so its frames free immediately.
+    service_console();
+    reap_terminated();
     if let Some(pid) = take_next_pending() {
         start(pid);
     }
@@ -605,16 +640,25 @@ fn reap_terminated() {
 }
 
 fn start(pid: usize) -> ! {
-    // Restored continuation (M6): the address space is already built and a
-    // saved trap frame is waiting — resume straight into it.
+    // Restored continuation (M6) or preempted payload (M13): the address space
+    // is already built and a saved trap frame is waiting — resume straight
+    // into it. A preemption resumes SILENTLY: no new `payload_start` (the
+    // causal anchor stays the original start) and `started_at` untouched (a
+    // suspension must not refill a deadline budget). A restore is a new
+    // continuation and announces itself.
     let resume = TABLE[pid].resume_frame.load(RE);
     if resume != 0 {
         let root = TABLE[pid].root.load(RE);
+        let preempted = TABLE[pid].preempted.swap(false, RE);
         TABLE[pid].state.store(RUNNING, RE);
-        TABLE[pid].started_at.store(hal::read_time(), RE);
+        if !preempted {
+            TABLE[pid].started_at.store(hal::read_time(), RE);
+        }
         CURRENT.store(pid, RE);
-        let name = IMAGES[TABLE[pid].image.load(RE)].name;
-        emit_start(pid, name, TABLE[pid].caps.load(RE), 0, true);
+        if !preempted {
+            let name = IMAGES[TABLE[pid].image.load(RE)].name;
+            emit_start(pid, name, TABLE[pid].caps.load(RE), 0, true);
+        }
         hal::resume_user(AddressSpace::from_root(root).satp(), resume);
     }
 
@@ -812,6 +856,7 @@ fn enqueue_restore(sid: usize) -> Option<usize> {
             slot.started_at.store(0, RE);
             slot.root.store(new_as.root(), RE);
             slot.resume_frame.store(new_frame, RE);
+            slot.preempted.store(false, RE); // a restore announces itself
             slot.start_event.store(0, RE); // see enqueue: no stale causal anchor
             slot.state.store(PENDING, RE);
             return Some(pid);
@@ -1097,6 +1142,137 @@ fn write_base64(f: &mut FrameBuf, bytes: &[u8]) {
     }
 }
 
+// ---- M13: the preemptive control plane ------------------------------------
+// Before M13 the control plane was deaf while a payload ran: serial bytes
+// buffered until the suite drained. Now a timer tick that finds console input
+// pending (for a payload that has NOT opted into keyboard input) suspends the
+// payload — its trap frame is saved exactly the way M6 checkpoints save one —
+// and hands the CPU to the scheduler, which services the control plane
+// (JSON-RPC frames; the ring-dump byte) and then resumes the payload
+// transparently: no new `payload_start`, deadline budget not refilled. This is
+// what makes E2 possible — a live incident (a livelocked payload) can be
+// remediated via the `kill` tool WHILE it runs. Preemption is input-driven
+// only: with no operator traffic the payload runs exactly as before, which is
+// why input-free determinism (P9) is unaffected.
+
+/// One serial byte consumed by the preempting tick, handed to the scheduler's
+/// console service (SBI has no peek — the poll that detects pending input
+/// necessarily consumes the first byte). 0x100|byte when full, 0 when empty.
+static STASHED_BYTE: AtomicU32 = AtomicU32::new(0);
+
+/// Tick hook: if console input is pending while a non-input payload runs,
+/// save its frame (state → PENDING, `preempted`) and tell the trap handler to
+/// redirect to the scheduler. The consumed byte is stashed for the service
+/// loop. Called with interrupts hardware-off, before `frame` is rewritten.
+pub fn maybe_preempt(frame: &crate::traps::TrapFrame) -> bool {
+    let pid = match current_pid() {
+        Some(p) => p,
+        None => return false,
+    };
+    if TABLE[pid].state.load(RE) != RUNNING {
+        return false;
+    }
+    // Payloads that read the keyboard own the serial line while they run (the
+    // v2 key protocol, audit-hardened); their bytes were already drained.
+    #[cfg(feature = "doom")]
+    if image_wants_input(TABLE[pid].image.load(RE)) {
+        return false;
+    }
+    let b = match hal::console_getchar() {
+        Some(b) => b,
+        None => return false,
+    };
+    STASHED_BYTE.store(0x100 | b as u32, RE);
+    // Save the suspended register file into the slot's resume frame (allocate
+    // one on first preemption; reuse thereafter). If the pool is somehow
+    // exhausted, don't preempt — the stashed byte is still serviced when the
+    // payload eventually leaves the CPU.
+    let mut rf = TABLE[pid].resume_frame.load(RE);
+    if rf == 0 {
+        rf = match frames::alloc() {
+            Some(f) => f,
+            None => return false,
+        };
+        TABLE[pid].resume_frame.store(rf, RE);
+    }
+    crate::traps::save_frame_to(frame, rf, frame.a0());
+    TABLE[pid].preempted.store(true, RE);
+    TABLE[pid].state.store(PENDING, RE);
+    emit_sched_preempt(pid);
+    true
+}
+
+/// Scheduler-side control-plane service (M13): handle the byte the preempting
+/// tick stashed, then anything else queued, then return so the scheduler can
+/// resume payloads. Only the structured plane and the read-only ring dump are
+/// served here — suite-seeding and crash bytes stay idle-only (a mid-run
+/// reseed would destroy live payloads; `rpc` enforces the same rule for the
+/// equivalent tools with a `busy` error).
+fn service_console() {
+    loop {
+        let stashed = STASHED_BYTE.swap(0, RE);
+        let b = if stashed != 0 {
+            (stashed & 0xff) as u8
+        } else {
+            match hal::console_getchar() {
+                Some(b) => b,
+                None => return,
+            }
+        };
+        match b {
+            0xAA => crate::rpc::read_request(),
+            b'r' => crate::traps::emit_ring_dump(),
+            _ => {} // idle-only commands (and junk) are ignored mid-run
+        }
+    }
+}
+
+/// True while any payload is alive (running or queued) — the `busy` guard for
+/// control-plane verbs that would destroy or divert live payloads.
+pub fn any_alive() -> bool {
+    TABLE
+        .iter()
+        .any(|s| matches!(s.state.load(RE), RUNNING | PENDING))
+}
+
+/// Operator kill by pid (the `kill` tool — E2's remediation verb). Kills a
+/// queued or preempted payload; returns the elapsed timebase units since it
+/// started (the MTTR numerator) or a structured refusal. PENDING only, on
+/// purpose: this runs in scheduler/idle context, never concurrently with a
+/// payload on the CPU, so a RUNNING state here would mean a caller from a
+/// context where marking KILLED without descheduling would silently lie —
+/// refuse it rather than half-kill.
+pub fn kill_pid(pid: usize) -> Result<u64, &'static str> {
+    let slot = TABLE.get(pid).ok_or("no such pid")?;
+    if slot.state.load(RE) != PENDING {
+        return Err("payload not alive");
+    }
+    slot.state.store(KILLED, RE);
+    emit_killed_operator(pid);
+    let started = slot.started_at.load(RE);
+    Ok(if started == 0 {
+        0
+    } else {
+        hal::read_time().saturating_sub(started)
+    })
+}
+
+/// The scheduler's explanation of a preemption (P11: "the scheduler explains
+/// its last decision"): the payload was suspended because control-plane input
+/// arrived.
+fn emit_sched_preempt(pid: usize) {
+    hal::without_interrupts(|| {
+        let mut f = FrameBuf::new();
+        let _ = write!(
+            f,
+            r#"{{"id":{},"type":"sched","action":"preempt","pid":{pid},"reason":"pending_input","caused_by":{}}}"#,
+            events::next_id(),
+            TABLE[pid].start_event.load(RE),
+        );
+        f.emit();
+    });
+}
+
 // ---- operator input (SYS_GETKEY, `doom` feature): keys as a queue ---------
 // The agentic input seam: while an input-wanting payload runs, serial bytes
 // are drained (by the timer tick) into a small ring the payload pops via
@@ -1237,17 +1413,24 @@ fn clear_keys() {
     KEY_PENDING.store(false, RE);
 }
 
-/// The operator killed the payload mid-run (P1: remediation is a structured
-/// event, not a power cycle). Shape mirrors the deadline kill. `caused_by` is
-/// null if the kill outraced `emit_start` (start_event still unset — the slot
-/// is reset on enqueue), so the causal DAG never gets a stale edge.
-#[cfg(feature = "doom")]
+/// The operator killed the payload (P1: remediation is a structured event,
+/// not a power cycle) — via the doom-build 0x03 key or the `kill` tool (E2).
+/// Shape mirrors the deadline kill, plus `elapsed` (timebase units since the
+/// payload started — the E2 time-to-mitigation fact; 0 if never started).
+/// `caused_by` is null if the kill outraced `emit_start` (start_event unset —
+/// the slot is reset on enqueue), so the causal DAG never gets a stale edge.
 fn emit_killed_operator(pid: usize) {
     hal::without_interrupts(|| {
+        let started = TABLE[pid].started_at.load(RE);
+        let elapsed = if started == 0 {
+            0
+        } else {
+            hal::read_time().saturating_sub(started)
+        };
         let mut f = FrameBuf::new();
         let _ = write!(
             f,
-            r#"{{"id":{},"type":"payload_killed","pid":{pid},"reason":"operator","caused_by":"#,
+            r#"{{"id":{},"type":"payload_killed","pid":{pid},"reason":"operator","elapsed":{elapsed},"caused_by":"#,
             events::next_id(),
         );
         match TABLE[pid].start_event.load(RE) {

@@ -260,6 +260,14 @@ pub fn handle(frame: &mut TrapFrame) {
         // (crate::payload::on_tick returns whether it killed the current one).
         if crate::payload::on_tick() || op_killed {
             redirect_to_scheduler(frame);
+            return;
+        }
+        // M13 seam: pending control-plane input suspends a (non-keyboard)
+        // payload so the scheduler can service it live, then resume — the
+        // frame must be saved (maybe_preempt does) BEFORE the redirect
+        // rewrites it.
+        if crate::payload::maybe_preempt(frame) {
+            redirect_to_scheduler(frame);
         }
         return;
     }

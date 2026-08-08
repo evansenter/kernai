@@ -143,6 +143,7 @@ fn handle_tools_call(json: &str, id: &str) {
                 "f" | "m6" => payload::seed_suite_m6,
                 "d" | "m10" => payload::seed_suite_m10,
                 "e" | "eval" => payload::seed_suite_eval,
+                "l" | "e2" => payload::seed_suite_e2,
                 // Feature-build workloads are first-class on the agent plane
                 // too (P4): an agent starts DOOM the same way it starts any
                 // suite — no fallback to the single-byte channel required.
@@ -152,6 +153,12 @@ fn handle_tools_call(json: &str, id: &str) {
                 "D" | "doom" => payload::seed_suite_doom,
                 _ => return respond_error(id, -32602, "unknown suite"),
             };
+            // M13: this may now be reached from the mid-run service window (a
+            // preempted payload is waiting). Reseeding would destroy live
+            // payloads — refuse with a structured busy instead.
+            if payload::any_alive() {
+                return respond_error(id, -32002, "busy: payloads active");
+            }
             if let Some(op) = op {
                 let h = fnv1a(op);
                 if op_seen(h) {
@@ -168,6 +175,11 @@ fn handle_tools_call(json: &str, id: &str) {
             payload::run();
         }
         Some("crash") => {
+            // Same mid-run guard as run_suite: the deliberate kernel fault is
+            // an idle-plane stimulus, not a remediation verb.
+            if payload::any_alive() {
+                return respond_error(id, -32002, "busy: payloads active");
+            }
             if let Some(op) = op {
                 let h = fnv1a(op);
                 if op_seen(h) {
@@ -177,6 +189,31 @@ fn handle_tools_call(json: &str, id: &str) {
             }
             respond_result(id, |f| f.write_str(r#"{"status":"crashing"}"#));
             hal::trigger_illegal_instruction(); // diverges: fault → shutdown
+        }
+        Some("kill") => {
+            // E2's remediation verb: kill a live payload by pid, servable
+            // MID-RUN via an M13 preemption. Mutating → opId-idempotent.
+            let args = object_get(params, "arguments").unwrap_or("{}");
+            let pid = match object_get(args, "pid").and_then(parse_u32) {
+                Some(p) => p as usize,
+                None => return respond_error(id, -32602, "missing pid"),
+            };
+            if let Some(op) = op {
+                let h = fnv1a(op);
+                if op_seen(h) {
+                    return respond_duplicate(id, op);
+                }
+                op_record(h);
+            }
+            match payload::kill_pid(pid) {
+                Ok(elapsed) => respond_result(id, move |f| {
+                    write!(
+                        f,
+                        r#"{{"status":"killed","pid":{pid},"elapsed":{elapsed}}}"#
+                    )
+                }),
+                Err(reason) => respond_error(id, -32602, reason),
+            }
         }
         Some("ring_read") => respond_result(id, traps::write_ring_resource),
         Some("set_surface") => {
@@ -328,7 +365,7 @@ fn respond_tools_list(id: &str) {
         tool(
             f,
             "run_suite",
-            "Run a payload suite (p|m|i|f|d|e; feature builds add craycast/doom).",
+            "Run a payload suite (p|m|i|f|d|e|e2; feature builds add craycast/doom).",
             Some("suite"),
         )?;
         f.write_str(",")?;
@@ -337,6 +374,13 @@ fn respond_tools_list(id: &str) {
             "crash",
             "Trigger a deliberate kernel fault → shutdown.",
             None,
+        )?;
+        f.write_str(",")?;
+        tool(
+            f,
+            "kill",
+            "Kill a live payload by pid — servable mid-run (M13/E2 remediation).",
+            Some("pid"),
         )?;
         f.write_str(",")?;
         tool(f, "ring_read", "Read the trap ring buffer.", None)?;
