@@ -156,49 +156,62 @@ client and `runner.py::m8`…`m11` for full sessions.
 - Deadlines are in timebase units (deterministic instruction proxy under
   -icount), not exact retired-instruction counts — see DECISIONS.md.
 
+## What the RFC evaluation plan now covers
+
+The `make test` gate has grown from the ladder's milestone checks to the full
+RFC eval spine — 22 checks, all deterministic and stdlib-only:
+
+- **E1** (diagnostic sufficiency): 9 seeded faults, structured surface recovers
+  40/40 localization facts vs the classic twin's 19/40 (`make eval` for the
+  scorecard; `harness/eval.py::BUGS` is the extension point toward N≥20).
+- **E2** (live MTTR): a deadline-less `livelock` remediated mid-run two ways —
+  `kill` and `set_budget` — through an M13 preemption.
+- **E4** (operator ablation): live vs static vs random policy over the same
+  incident; live mitigates all, the others none.
+- **E5** (injection red-team): the `injector` payload's fake directive is
+  refused with P7 framing and obeyed without it — same fixed policy.
+- **E6** (replay fidelity): two input-free boots byte-identical; recorded input
+  replays bit-for-bit (M7).
+- **E7** (attenuation + allocator soundness): `fuzzdelegate` sweeps requested
+  caps; every `payload_spawn` asserted against the lattice; the `memory`
+  resource confirms zero frame leak across every reap path.
+- **E8** (token economics): reactive vs autonomous vs budgeted-digest wire-byte
+  cost, quantified.
+
+Beyond CI: **`make agent-eval`** puts a pluggable operator (`harness/operator.py`:
+deterministic rule policy, or `KERNAI_OPERATOR=llm` for a real model) in front
+of both surfaces and reports localization rate + MTTR — the actual E1/E2
+experiments the CI proxies stand in for. **`make conformance`** drives kernai and
+a degraded reference implementation (`refimpl/daemon.py`, same framing + MCP,
+payloads-as-subprocesses) through one session and shows kernai's fault frame
+carries six structured fields the degraded backend can't — the surface is a
+contract targetable by more than one mechanism.
+
+Full design writeup: **`docs/DESIGN.md`** (as-built architecture, the twelve
+principles' mechanisms, the eval results, DOOM as the capstone).
+
 ## Exact next step
 
-**The M0–M13 ladder is complete and green, and full DOOM runs on it.** All
-milestones and their acceptance checks are in `make test`; the twelve
-principles P1–P12 each have a concrete, tested mechanism; the MCP surface is
-published (`docs/SPEC.md`); DOOM (the `doom` feature) demonstrates the
-isolation model on a large real-world C workload; and M13's input-driven
-preemption makes the control plane live against running payloads — the `e2`
-check remediates a livelocked payload mid-run via the `kill` tool, control
-plane only.
+**The M0–M13 ladder, the full E1–E8 eval spine, DOOM (play + checkpoint/fork),
+and the reference implementation are all complete and green.** `make test` is
+22 checks; nothing is known-broken.
 
-Expansion directions, in the RFC's spirit (pick by value; none is blocking):
+What genuinely remains is *measurement and reach*, not mechanism — every item
+below is a fresh, self-contained change; start from a green `make test`:
 
-0. **DOOM polish (optional).** Input, kill, MCP-start, and P8-compatibility are
-   DONE (`make doom-play`). Still open, all non-blocking: sound is dropped; the
-   `fbchunk` keyframe stream is throttled by `COLOR_EVERY` but not governed by
-   the P3 budget machinery (the autonomy dial governs trap frames only); DOOM
-   itself stays un-preemptible while running (it owns the serial line for
-   keystrokes — a deliberate M13 property, not a gap; every other payload gets
-   the live plane); and a DOOM-checkpoint demo (fork a game mid-level into
-   what-if continuations — the mm groundwork is in) would be a strong P8
-   showcase.
+1. **Run the model-gated evals for real.** `make agent-eval KERNAI_OPERATOR=llm`
+   across 2–3 models to publish localization-rate / MTTR / token distributions
+   (E1/E2/E5/E8 with a live operator). The scaffold, operators, and surfaces
+   are all in place; this needs API access, not new kernel code.
+2. **Grow the E1 stimulus set toward N≥20** — more seeded faults with distinct
+   diagnoses (divide-by-zero trap, a double-fault path, a use-after-free-style
+   dangling map). `harness/eval.py::BUGS` + a payload fixture each.
+3. **A general scheduler.** Preemption is input-driven (M13, all E2 needs);
+   time-sliced multiprogramming of several resident payloads is the one larger
+   architectural change no milestone has required — it would unlock concurrent
+   payloads and richer E4 pathologies (runaway spawn loop, snapshot hog).
+4. **Keyed-DOOM replay at scale** (snapshot-anchored short-window rr, or
+   kernel-side input logging via the key ring) and DOOM sound — cosmetics.
 
-1. **Grow the E1 stimulus set toward N≥20** (RFC E1). Add seeded faults with
-   distinct diagnosis needs (unmapped-address load, misaligned access, a stack
-   overflow, a divide trap) — each a tiny payload fixture — so the surface
-   benchmark is broader. `harness/eval.py::BUGS` is the extension point.
-2. **Full agent-in-the-loop E1.** The current `e1` is a deterministic
-   surface-content proxy (facts-recoverable). The real experiment drives an LLM
-   operator over each surface and measures localization rate/time/tokens; it
-   needs model access, so it belongs in `make eval`/a separate harness, not CI.
-3. **E2 mechanism: DONE (M13).** Input-driven preemption, the `kill` AND
-   `set_budget` tools (both P4 named verbs; the `e2` check remediates the
-   livelock both ways — direct kill, and budget-tightening where the kernel's
-   own deadline mechanism does the ending), and the `livelock` pathology are
-   in. What remains of E2 proper is the *measurement*: the A/B across surfaces
-   with an LLM operator (same model-access dependency as item 2), plus a
-   richer pathology set (runaway spawn loop, snapshot hog — new fixtures only,
-   the verbs exist).
-4. **A degraded reference implementation** (a Linux daemon speaking the same
-   `docs/SPEC.md` surface — no true checkpoint/fork, but real) so the eval suite
-   becomes a public benchmark for *both* kernel surfaces and operator agents.
-5. **Remaining evals** E4/E5/E7/E8 as the RFC defines them.
-
-Nothing is known-broken. Any of the above is a fresh, self-contained change;
-start from a green `make test` and keep each milestone's check green.
+The three live docs (`ARCHITECTURE.md`, `DECISIONS.md`, this file) plus
+`DESIGN.md` and `SPEC.md` are current as of session 4.

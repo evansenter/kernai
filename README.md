@@ -23,7 +23,7 @@ coalesces the event firehose into a bounded severity-ranked summary (M11, P3);
 and the E1 evaluation — scoring the two diagnostic surfaces over a seeded-fault
 set (the structured surface recovers 17/17 localization facts, the classic
 printf twin 8/17), plus the published surface spec (M12, `docs/SPEC.md`). The
-**M0–M12 ladder is complete.** `make eval` prints the E1 scorecard.
+**M0–M13 ladder + the full E1–E8 eval spine are complete** (22 `make test` checks); DOOM runs as a sandboxed payload. `make eval` prints the E1 scorecard; `docs/DESIGN.md` is the writeup.
 
 ## Bootstrap (Ubuntu 24.04 or similar)
 
@@ -56,11 +56,19 @@ make test    # full acceptance suite: framing (M0), boot (M1), traps/timer/fault
              # E1 surface eval + E3 cold-handoff (M12), input hardening,
              # determinism, demo — plus unsafe budget; CI runs this
 make eval    # print the E1 scorecard: diagnostic facts recoverable per surface
+make agent-eval  # E1/E2 with an operator in the loop (rule; or KERNAI_OPERATOR=llm)
+make conformance # kernai vs the degraded reference impl over the same surface
 make raycast # (needs clang+lld) a C raycaster payload — proto-Doom — rendered
              # as deterministic ASCII frames; proof kernai runs C workloads
+make doom       # (needs riscv64-gcc+picolibc+freedoom) full DOOM as a sandboxed
+                # payload: title + attract demo, colour PNG screenshots
+make doom-play  # an agent plays DOOM through the kernel surfaces (MCP + getkey)
+make doom-fork  # checkpoint a live game, fork two divergent what-if futures (P8)
 make debug   # boot QEMU halted with a gdb stub on :1234
 make gdb     # attach gdb-multiarch to a running `make debug`
 ```
+
+Full design writeup: `docs/DESIGN.md`. Wire contract: `docs/SPEC.md`.
 
 Once booted (`make run`), the kernel serves single-byte operator commands on
 the serial line: `r` dumps the trap ring, `x` crashes the kernel on purpose,
